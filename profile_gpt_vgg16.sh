@@ -171,7 +171,7 @@ PYEOF
 
     "$NCU" --section SpeedOfLight \
            --section SpeedOfLight_RooflineChart \
-           --section LaunchStatistics \
+           --section LaunchStats \
            --target-processes all \
            -o "$WORK/ncu_raw" \
            python3 "$PY_SCRIPT"
