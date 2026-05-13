@@ -242,7 +242,22 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
 
     torch.cuda.synchronize()
 
-    # 第二步：加载 kernel profile 并 autotune（必须在启动调度器线程之前）
+    # ========================================================================
+    # 串行 Warmup（在 Green Context 创建之前执行）
+    #
+    # 关键发现：VGG16 的 cuDNN 初始化在 Green Context 创建后会卡死，
+    # 即使禁用 benchmark 也无法解决。必须在 SM 分区之前完成 warmup。
+    # ========================================================================
+    print("\nSerial warmup (before Green Context creation)...")
+    for idx in range(num_clients):
+        client_type = "HP" if idx == 0 else f"BE{idx}"
+        print(f"  Warming up {client_type} (client {idx})...")
+        with torch.no_grad():
+            _ = models[idx](inputs[idx])
+        torch.cuda.synchronize()
+        print(f"  {client_type} warmup done")
+
+    # 第二步：加载 kernel profile 并 autotune（warmup 之后）
     if kernel_info_paths and len(kernel_info_paths) >= num_clients:
         print(f"\nLoading kernel profiles...")
         for i in range(num_clients):
@@ -282,47 +297,6 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     client_start_times = [0.0] * num_clients
     client_end_times = [0.0] * num_clients
     thread_ids = {}
-
-    # ========================================================================
-    # 串行 Warmup（在主线程上依次执行）
-    #
-    # 问题：Green Context 创建后，SM 已被分区（如 HP=24, BE=80）。
-    # cuDNN 的 algorithm benchmark 需要完整 GPU 资源来测试各算法性能，
-    # 在资源受限环境下会卡死。GPT 使用 cuBLAS 不做 benchmark 所以成功。
-    #
-    # 解决：禁用 cuDNN benchmark，使用默认算法（类似 GPT 的 cuBLAS）。
-    # ========================================================================
-    print("\nSerial warmup (main thread)...")
-
-    # 保存原始设置
-    original_benchmark = torch.backends.cudnn.benchmark
-    original_deterministic = torch.backends.cudnn.deterministic
-
-    # 禁用 cuDNN benchmark，避免在 Green Context 创建后卡死
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    print("  cuDNN benchmark disabled for warmup (using default algorithms)")
-
-    for idx in range(num_clients):
-        client_type = "HP" if idx == 0 else f"BE{idx}"
-        print(f"  Warming up {client_type} (client {idx})...")
-        print(f"    [DEBUG] About to call model forward...")
-        import sys
-        sys.stdout.flush()
-
-        with torch.no_grad():
-            _ = models[idx](inputs[idx])
-
-        print(f"    [DEBUG] Model forward completed, calling synchronize...")
-        sys.stdout.flush()
-        torch.cuda.synchronize()
-        print(f"  {client_type} warmup done")
-        sys.stdout.flush()
-
-    # 恢复原始设置（正式执行时可以启用 benchmark）
-    torch.backends.cudnn.benchmark = original_benchmark
-    torch.backends.cudnn.deterministic = original_deterministic
-    print("  cuDNN settings restored")
 
     def worker(idx):
         """客户端工作线程（仅执行，warmup 已在主线程完成）"""
