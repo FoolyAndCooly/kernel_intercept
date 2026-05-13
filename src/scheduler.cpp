@@ -1077,7 +1077,7 @@ void Scheduler::run() {
             // BE 调度判断：DEFAULT 模式基于 SM 冲突，ISOLATED 模式始终允许
             if (i > 0 && !orion_should_schedule(op, i)) continue;
 
-            LOG_DEBUG("[SCHEDULER] Dequeuing op from client %d, type=%d", i, (int)op->type);
+            LOG_INFO("[SCHEDULER] Dequeuing op from client %d, type=%d", i, (int)op->type);
 
             g_capture_state.client_queues[i]->try_pop();
 
@@ -1091,10 +1091,10 @@ void Scheduler::run() {
                 cublas_handle = cublas_handles_[ctx_idx];
 
                 if (is_kernel_operation(op->type) && ctx_idx != current_ctx_idx_) {
-                    LOG_DEBUG("[SCHEDULER] Switching context from %d to %d", current_ctx_idx_, ctx_idx);
+                    LOG_INFO("[SCHEDULER] Switching context from %d to %d", current_ctx_idx_, ctx_idx);
                     cuCtxSetCurrent(cuda_ctxs_[ctx_idx]);
                     current_ctx_idx_ = ctx_idx;
-                    LOG_DEBUG("[SCHEDULER] Context switched to %d", ctx_idx);
+                    LOG_INFO("[SCHEDULER] Context switched to %d", ctx_idx);
                 }
             } else {
                 stream = (i == 0) ? hp_default_stream_ : be_default_streams_[i - 1];
@@ -1103,9 +1103,9 @@ void Scheduler::run() {
                 }
             }
 
-            LOG_DEBUG("[SCHEDULER] Executing op for client %d", i);
+            LOG_INFO("[SCHEDULER] Executing op for client %d", i);
             cudaError_t err = execute_operation(op, stream, cublas_handle);
-            LOG_DEBUG("[SCHEDULER] Op executed for client %d, err=%d", i, (int)err);
+            LOG_INFO("[SCHEDULER] Op executed for client %d, err=%d", i, (int)err);
 
             if (is_kernel_operation(op->type)) {
                 std::lock_guard<std::mutex> lock(g_orion_state.mutex);
