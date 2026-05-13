@@ -228,46 +228,34 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     print(f"       Config: emb={EMB_SIZE}, heads={HEAD_SIZE}, layers={N_LAYER}")
     print(f"       Input: batch={GPT_BATCH_SIZE}, seq_len={SEQUENCE_LEN}")
 
-    # BE (client 1+): VGG16
+    # BE (client 1+): 也使用 GPT（测试：避免 cuDNN 问题）
     models = [gpt_model]
     inputs = [torch.randint(0, VOCAB_SIZE, (GPT_BATCH_SIZE, SEQUENCE_LEN), device="cuda")]
 
     for i in range(num_be):
-        vgg_model = VGG16Model(use_torchvision=True).to("cuda").eval()
-        vgg_params = sum(p.numel() for p in vgg_model.parameters())
-        print(f"  [BE{i+1}] VGG16 params: {vgg_params/1e6:.1f}M")
-        print(f"        Input: batch={VGG_BATCH_SIZE}, size={VGG_IMAGE_SIZE}x{VGG_IMAGE_SIZE}")
-        models.append(vgg_model)
-        inputs.append(torch.randn(VGG_BATCH_SIZE, 3, VGG_IMAGE_SIZE, VGG_IMAGE_SIZE, device="cuda"))
+        # 使用 GPT 代替 VGG16，测试是否是 cuDNN 的问题
+        be_gpt_model = CharGPT(vs=VOCAB_SIZE).to("cuda").eval()
+        be_gpt_params = sum(p.numel() for p in be_gpt_model.parameters())
+        print(f"  [BE{i+1}] GPT params: {be_gpt_params/1e6:.1f}M (using GPT instead of VGG16)")
+        print(f"        Config: emb={EMB_SIZE}, heads={HEAD_SIZE}, layers={N_LAYER}")
+        print(f"        Input: batch={GPT_BATCH_SIZE}, seq_len={SEQUENCE_LEN}")
+        models.append(be_gpt_model)
+        inputs.append(torch.randint(0, VOCAB_SIZE, (GPT_BATCH_SIZE, SEQUENCE_LEN), device="cuda"))
 
     torch.cuda.synchronize()
 
     # ========================================================================
     # 串行 Warmup（在 Green Context 创建之前执行）
     #
-    # 关键发现：VGG16 的 cuDNN 初始化在 Green Context 创建后会卡死，
-    # 即使禁用 benchmark 也无法解决。必须在 SM 分区之前完成 warmup。
-    #
-    # 诊断：用简单卷积层代替完整 VGG16，隔离问题
+    # 测试：使用两个 GPT（都是 cuBLAS）代替 GPT+VGG16，验证是否是
+    # cuDNN 导致的卡死问题。
     # ========================================================================
     print("\nSerial warmup (before Green Context creation)...")
     for idx in range(num_clients):
         client_type = "HP" if idx == 0 else f"BE{idx}"
         print(f"  Warming up {client_type} (client {idx})...")
-
-        if idx == 0:
-            # HP: 正常 warmup GPT
-            with torch.no_grad():
-                _ = models[idx](inputs[idx])
-        else:
-            # BE: 用简单卷积层代替完整 VGG16
-            print(f"    [DEBUG] Using simple conv layer instead of full VGG16")
-            simple_conv = torch.nn.Conv2d(3, 64, kernel_size=3, padding=1).cuda()
-            simple_input = torch.randn(1, 3, 32, 32, device='cuda')
-            with torch.no_grad():
-                _ = simple_conv(simple_input)
-            print(f"    [DEBUG] Simple conv completed")
-
+        with torch.no_grad():
+            _ = models[idx](inputs[idx])
         torch.cuda.synchronize()
         print(f"  {client_type} warmup done")
 
