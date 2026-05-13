@@ -317,12 +317,11 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
 
         print(f"[DEBUG] Worker {idx} started, tid={tid}")
 
-        # 在 worker 线程中初始化 CUDA context（每个线程需要自己的 context）
-        # 这对 Green Context 模式尤其重要，因为 CUDA context 是 thread-local 的
-        torch.cuda.set_device(0)
-        # 注意：不调用 synchronize()，因为 Green Context 的 prime 操作可能已经破坏了状态
+        # 方案 1：不在 worker 线程中创建新的 CUDA context
+        # 直接使用主线程的 CUDA context，避免 context 不匹配导致的内存访问冲突
+        # torch.cuda.set_device(0)  # 注释掉，让 worker 使用主线程的 context
 
-        print(f"[DEBUG] Worker {idx} CUDA initialized")
+        print(f"[DEBUG] Worker {idx} using main thread's CUDA context")
 
         lib.orion_set_client_idx(idx)
         client_type = "HP" if idx == 0 else f"BE{idx}"
@@ -342,6 +341,15 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
             else:
                 # Green Context 模式：使用 default stream，Orion 会自动路由
                 print(f"[DEBUG] Worker {idx} calling model forward")
+
+                # 先做一个简单的 CUDA 操作测试
+                if idx == 1:
+                    print(f"[DEBUG] Worker 1: testing simple CUDA operation")
+                    test_tensor = torch.zeros(10, device='cuda')
+                    test_tensor += 1
+                    torch.cuda.synchronize()
+                    print(f"[DEBUG] Worker 1: simple CUDA operation completed, sum={test_tensor.sum().item()}")
+
                 with torch.no_grad():
                     _ = models[idx](inputs[idx])
                 # Green Context 模式下使用 torch.cuda.synchronize() 而不是 orion_sync_client_stream
