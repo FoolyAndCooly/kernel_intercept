@@ -280,12 +280,24 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     # - BE (client 1+) 的操作在 be_streams_[client_idx-1] 上执行
     # - orion_sync_client_stream(idx) 只同步该客户端的 stream
     # ========================================================================
-    streams = [torch.cuda.Stream() for _ in range(num_clients)]
 
-    # Step B：登记 stream→client 映射，供 cuDNN/cuBLAS 内部 worker 线程
-    # 在 resolve_client_idx 里命中 client 归属。
-    for i, s in enumerate(streams):
-        lib.orion_register_client_stream(i, ctypes.c_void_p(s.cuda_stream))
+    # Green Context 模式下，Orion 内部已经创建了 stream，不应该再创建外部 stream
+    # 否则会导致 CUDA context 冲突（非法内存访问）
+    use_green_context = os.getenv("ORION_GC_AUTOTUNE") == "1"
+
+    if use_green_context:
+        # Green Context 模式：使用 Orion 内部的 stream，不创建新 stream
+        # worker 线程中使用 default stream（None）即可，Orion 会自动路由到正确的 GC stream
+        streams = [None] * num_clients
+        print("Green Context mode: using Orion internal streams")
+    else:
+        # DEFAULT 模式：创建 PyTorch stream 并注册到 Orion
+        streams = [torch.cuda.Stream() for _ in range(num_clients)]
+        # Step B：登记 stream→client 映射，供 cuDNN/cuBLAS 内部 worker 线程
+        # 在 resolve_client_idx 里命中 client 归属。
+        for i, s in enumerate(streams):
+            lib.orion_register_client_stream(i, ctypes.c_void_p(s.cuda_stream))
+        print("DEFAULT mode: using PyTorch streams")
 
     barrier = threading.Barrier(num_clients)
     start = threading.Event()
@@ -308,7 +320,13 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
         # Step A：在 capture 已启用的前提下做一次 warmup，
         # 让 cuDNN/cuBLAS 的 plan cache、workspace、module loader 提前预热，
         # 避免第一次真正推理时碰到冷启动开销（~7 ms）。
-        with torch.cuda.stream(streams[idx]):
+        if streams[idx] is not None:
+            # DEFAULT 模式：使用指定的 PyTorch stream
+            with torch.cuda.stream(streams[idx]):
+                with torch.no_grad():
+                    _ = models[idx](inputs[idx])
+        else:
+            # Green Context 模式：使用 default stream，Orion 会自动路由
             with torch.no_grad():
                 _ = models[idx](inputs[idx])
         lib.orion_sync_client_stream(idx)
@@ -323,7 +341,14 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
 
         # 执行模型推理
         # 算子被拦截并提交到调度器队列，在调度器的 stream 上执行
-        with torch.cuda.stream(streams[idx]):
+        if streams[idx] is not None:
+            # DEFAULT 模式：使用指定的 PyTorch stream
+            with torch.cuda.stream(streams[idx]):
+                with torch.no_grad():
+                    for i in range(num_iters):
+                        _ = models[idx](inputs[idx])
+        else:
+            # Green Context 模式：使用 default stream，Orion 会自动路由
             with torch.no_grad():
                 for i in range(num_iters):
                     _ = models[idx](inputs[idx])
