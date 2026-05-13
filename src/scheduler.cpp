@@ -973,12 +973,18 @@ void Scheduler::reset() {
  *   若不冲突（总和 ≤ GPU SM 数）则允许并发，否则等 HP 空闲。
  */
 bool Scheduler::orion_should_schedule(OperationPtr op, int client_idx) {
-    if (is_memory_operation(op->type)) return true;
-    if (!is_kernel_operation(op->type)) return true;
+    if (is_memory_operation(op->type)) {
+        LOG_INFO("[SHOULD_SCHEDULE] Client %d: memory op, allowed", client_idx);
+        return true;
+    }
+    if (!is_kernel_operation(op->type)) {
+        LOG_INFO("[SHOULD_SCHEDULE] Client %d: non-kernel op, allowed", client_idx);
+        return true;
+    }
 
     // ISOLATED 模式：HP/BE 各有独立 SM 分区，无需互相等待
     if (current_mode_ == ExecutionMode::ISOLATED) {
-        LOG_DEBUG("[SCHEDULE] Client %d: BE kernel allowed (ISOLATED mode)", client_idx);
+        LOG_INFO("[SHOULD_SCHEDULE] Client %d: BE kernel allowed (ISOLATED mode)", client_idx);
         return true;
     }
 
@@ -1069,13 +1075,32 @@ void Scheduler::run() {
 
         // 轮询所有客户端队列（模式已静态固定，无需每轮决策）
         for (int i = 0; i < num_clients_; i++) {
-            if (!g_capture_state.client_queues[i]) continue;
+            if (!g_capture_state.client_queues[i]) {
+                if (i == 1 && loop_count % 10000 == 0) {
+                    LOG_INFO("[SCHEDULER] Client 1 queue is null!");
+                }
+                continue;
+            }
 
             auto op = g_capture_state.client_queues[i]->peek();
-            if (!op) continue;
+            if (!op) {
+                if (i == 1 && loop_count % 10000 == 0) {
+                    LOG_INFO("[SCHEDULER] Client 1 queue is empty (loop %lu)", loop_count);
+                }
+                continue;
+            }
+
+            if (i == 1) {
+                LOG_INFO("[SCHEDULER] Client 1 has op, type=%d, checking schedule...", (int)op->type);
+            }
 
             // BE 调度判断：DEFAULT 模式基于 SM 冲突，ISOLATED 模式始终允许
-            if (i > 0 && !orion_should_schedule(op, i)) continue;
+            if (i > 0 && !orion_should_schedule(op, i)) {
+                if (i == 1) {
+                    LOG_INFO("[SCHEDULER] Client 1 op BLOCKED by should_schedule");
+                }
+                continue;
+            }
 
             LOG_INFO("[SCHEDULER] Dequeuing op from client %d, type=%d", i, (int)op->type);
 
