@@ -51,21 +51,18 @@ void register_client_handle(int client_idx, void* handle) {
 
 int resolve_client_idx(void* stream, void* handle) {
     if (tl_client_idx >= 0) {
-        LOG_INFO("[RESOLVE] tl_client_idx=%d (stream=%p, handle=%p)", tl_client_idx, stream, handle);
         return tl_client_idx;
     }
     std::shared_lock lk(g_client_map_mutex);
     if (stream) {
         auto it = g_stream_to_client.find(stream);
         if (it != g_stream_to_client.end()) {
-            LOG_INFO("[RESOLVE] Found client %d via stream %p", it->second, stream);
             return it->second;
         }
     }
     if (handle) {
         auto it = g_handle_to_client.find(handle);
         if (it != g_handle_to_client.end()) {
-            LOG_INFO("[RESOLVE] Found client %d via handle %p", it->second, handle);
             return it->second;
         }
     }
@@ -205,10 +202,15 @@ OperationPtr create_operation(int client_idx, OperationType type) {
 void enqueue_operation(OperationPtr op) {
     if (!op) return;
 
-    LOG_TRACE("Client %d enqueuing op %lu type %s",
-              op->client_idx, op->op_id, op_type_name(op->type));
+    if (op->client_idx == 1) {
+        LOG_INFO("[ENQUEUE] Client 1 enqueuing op %lu type %s", op->op_id, op_type_name(op->type));
+    }
 
     g_capture_state.client_queues[op->client_idx]->push(op);
+
+    if (op->client_idx == 1) {
+        LOG_INFO("[ENQUEUE] Client 1 op %lu pushed to queue", op->op_id);
+    }
 }
 
 void wait_operation(OperationPtr op) {
