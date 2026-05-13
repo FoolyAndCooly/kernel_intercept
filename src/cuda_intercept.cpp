@@ -1040,7 +1040,7 @@ CUresult cuLaunchKernel(CUfunction f,
     return op->result == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
 }
 
- *
+/**
  * 拦截设备级同步操作。这是显式同步操作，需要等待所有之前的操作完成。
  *
  * 特殊处理：
