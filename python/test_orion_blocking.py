@@ -314,13 +314,19 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
         tid = libc.syscall(SYS_gettid)
         thread_ids[idx] = tid
 
+        print(f"[DEBUG] Worker {idx} started, tid={tid}")
+
         # 在 worker 线程中初始化 CUDA context（每个线程需要自己的 context）
         # 这对 Green Context 模式尤其重要，因为 CUDA context 是 thread-local 的
         torch.cuda.set_device(0)
         # 注意：不调用 synchronize()，因为 Green Context 的 prime 操作可能已经破坏了状态
 
+        print(f"[DEBUG] Worker {idx} CUDA initialized")
+
         lib.orion_set_client_idx(idx)
         client_type = "HP" if idx == 0 else f"BE{idx}"
+
+        print(f"[DEBUG] Worker {idx} starting warmup")
 
         # Step A：在 capture 已启用的前提下做一次 warmup，
         # 让 cuDNN/cuBLAS 的 plan cache、workspace、module loader 提前预热，
@@ -337,11 +343,17 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
                 _ = models[idx](inputs[idx])
             # Green Context 模式下使用 torch.cuda.synchronize() 而不是 orion_sync_client_stream
             # 因为 GC stream 在不同的 CUDA context 中，直接同步会阻塞
+            print(f"[DEBUG] Worker {idx} warmup done, calling synchronize")
             torch.cuda.synchronize()
+            print(f"[DEBUG] Worker {idx} synchronize done")
+
+        print(f"[DEBUG] Worker {idx} warmup complete, waiting for start signal")
 
         # 等待所有线程同时开始
         start.wait()
+        print(f"[DEBUG] Worker {idx} got start signal, waiting at barrier")
         barrier.wait()
+        print(f"[DEBUG] Worker {idx} passed barrier")
 
         # 开始计时
         t0 = time.time()
