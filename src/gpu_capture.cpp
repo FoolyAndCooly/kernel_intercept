@@ -50,16 +50,26 @@ void register_client_handle(int client_idx, void* handle) {
 }
 
 int resolve_client_idx(void* stream, void* handle) {
-    if (tl_client_idx >= 0) return tl_client_idx;
+    if (tl_client_idx >= 0) {
+        LOG_INFO("[RESOLVE] tl_client_idx=%d (stream=%p, handle=%p)", tl_client_idx, stream, handle);
+        return tl_client_idx;
+    }
     std::shared_lock lk(g_client_map_mutex);
     if (stream) {
         auto it = g_stream_to_client.find(stream);
-        if (it != g_stream_to_client.end()) return it->second;
+        if (it != g_stream_to_client.end()) {
+            LOG_INFO("[RESOLVE] Found client %d via stream %p", it->second, stream);
+            return it->second;
+        }
     }
     if (handle) {
         auto it = g_handle_to_client.find(handle);
-        if (it != g_handle_to_client.end()) return it->second;
+        if (it != g_handle_to_client.end()) {
+            LOG_INFO("[RESOLVE] Found client %d via handle %p", it->second, handle);
+            return it->second;
+        }
     }
+    LOG_INFO("[RESOLVE] No client found (stream=%p, handle=%p, tl_client_idx=%d)", stream, handle, tl_client_idx);
     return -1;
 }
 
