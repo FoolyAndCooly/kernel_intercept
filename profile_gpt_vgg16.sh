@@ -82,7 +82,7 @@ profile_model() {
     echo "========================================"
 
     # ── Step 1: NCU profiling ─────────────────────────────────────────
-    echo "[$TAG][1/5] Running NCU (--set full)..."
+    echo "[$TAG][1/5] Running NCU (SpeedOfLight + SpeedOfLight_RooflineChart + LaunchStatistics)..."
     local PY_SCRIPT="$WORK/run_model.py"
 
     if [[ "$TAG" == "gpt" ]]; then
@@ -169,9 +169,10 @@ print("VGG16 profile done")
 PYEOF
     fi
 
-    "$NCU" --set full \
+    "$NCU" --section SpeedOfLight \
+           --section SpeedOfLight_RooflineChart \
+           --section LaunchStatistics \
            --target-processes all \
-           --csv \
            -o "$WORK/ncu_raw" \
            python3 "$PY_SCRIPT"
     echo "[$TAG][1/5] NCU profiling done"
