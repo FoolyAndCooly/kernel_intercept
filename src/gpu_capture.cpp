@@ -66,7 +66,7 @@ int resolve_client_idx(void* stream, void* handle) {
             return it->second;
         }
     }
-    LOG_INFO("[RESOLVE] No client found (stream=%p, handle=%p, tl_client_idx=%d)", stream, handle, tl_client_idx);
+    LOG_DEBUG("[RESOLVE] No client found (stream=%p, handle=%p, tl_client_idx=%d)", stream, handle, tl_client_idx);
     return -1;
 }
 
