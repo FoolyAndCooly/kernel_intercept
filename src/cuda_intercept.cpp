@@ -34,6 +34,7 @@
  */
 
 #include "gpu_capture.h"
+#include <cuda.h>
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstring>
@@ -136,6 +137,10 @@ using cudaMemcpyAsync_t = cudaError_t (*)(void*, const void*, size_t, cudaMemcpy
 using cudaMemset_t = cudaError_t (*)(void*, int, size_t);
 using cudaMemsetAsync_t = cudaError_t (*)(void*, int, size_t, cudaStream_t);
 using cudaLaunchKernel_t = cudaError_t (*)(const void*, dim3, dim3, void**, size_t, cudaStream_t);
+using cudaLaunchKernelExC_t = cudaError_t (*)(const cudaLaunchConfig_t*, const void*, void**);
+using cuLaunchKernel_t = CUresult (*)(CUfunction, unsigned, unsigned, unsigned,
+                                       unsigned, unsigned, unsigned,
+                                       unsigned, CUstream, void**, void**);
 using cudaDeviceSynchronize_t = cudaError_t (*)();
 using cudaStreamSynchronize_t = cudaError_t (*)(cudaStream_t);
 using cudaEventSynchronize_t = cudaError_t (*)(cudaEvent_t);
@@ -160,6 +165,8 @@ static struct {
     cudaMemset_t cudaMemset;
     cudaMemsetAsync_t cudaMemsetAsync;
     cudaLaunchKernel_t cudaLaunchKernel;
+    cudaLaunchKernelExC_t cudaLaunchKernelExC;
+    cuLaunchKernel_t cuLaunchKernel;
     cudaDeviceSynchronize_t cudaDeviceSynchronize;
     cudaStreamSynchronize_t cudaStreamSynchronize;
     cudaEventSynchronize_t cudaEventSynchronize;
@@ -242,6 +249,14 @@ static void init_real_functions() {
     g_real_funcs.cudaMemset = (cudaMemset_t)get_cuda_func("cudaMemset");
     g_real_funcs.cudaMemsetAsync = (cudaMemsetAsync_t)get_cuda_func("cudaMemsetAsync");
     g_real_funcs.cudaLaunchKernel = (cudaLaunchKernel_t)get_cuda_func("cudaLaunchKernel");
+    // Step C：per-thread-stream 变体优先，拿不到再退回普通符号
+    g_real_funcs.cudaLaunchKernelExC =
+        (cudaLaunchKernelExC_t)get_cuda_func("cudaLaunchKernelExC_ptsz");
+    if (!g_real_funcs.cudaLaunchKernelExC) {
+        g_real_funcs.cudaLaunchKernelExC =
+            (cudaLaunchKernelExC_t)get_cuda_func("cudaLaunchKernelExC");
+    }
+    g_real_funcs.cuLaunchKernel = (cuLaunchKernel_t)get_cuda_func("cuLaunchKernel");
     g_real_funcs.cudaDeviceSynchronize = (cudaDeviceSynchronize_t)get_cuda_func("cudaDeviceSynchronize");
     g_real_funcs.cudaStreamSynchronize = (cudaStreamSynchronize_t)get_cuda_func("cudaStreamSynchronize");
     g_real_funcs.cudaEventSynchronize = (cudaEventSynchronize_t)get_cuda_func("cudaEventSynchronize");
@@ -289,6 +304,18 @@ static void init_real_functions() {
                 return g_real_funcs.func_name(__VA_ARGS__); \
             } \
             return cudaErrorUnknown; \
+        } \
+    } while(0)
+
+// Step C: driver API 专用透传宏，返回 CUresult
+#define SAFE_PASSTHROUGH_DRV(func_name, ...) \
+    do { \
+        if (!g_capture_state.initialized.load() || tl_is_scheduler_thread) { \
+            if (!g_real_funcs.initialized) init_real_functions(); \
+            if (g_real_funcs.func_name) { \
+                return g_real_funcs.func_name(__VA_ARGS__); \
+            } \
+            return CUDA_ERROR_UNKNOWN; \
         } \
     } while(0)
 
@@ -399,8 +426,6 @@ static std::once_flag g_event_init_flag;
  * @return CUDA 错误码
  */
 cudaError_t execute_kernel_launch(OperationPtr op, cudaStream_t scheduler_stream) {
-    GET_REAL_FUNC(cudaLaunchKernel);
-
     // 初始化事件（只执行一次）
     std::call_once(g_event_init_flag, []() {
         cudaEventCreate(&g_scheduler_event);
@@ -418,7 +443,30 @@ cudaError_t execute_kernel_launch(OperationPtr op, cudaStream_t scheduler_stream
     // 使用调度器分配的 stream 而不是客户端的 stream
     cudaStream_t stream_to_use = scheduler_stream ? scheduler_stream : p.stream;
 
-    // 调用真实的 cudaLaunchKernel
+    // Step C：按拦截来源选择 real_func。Runtime 的 launch（KERNEL_LAUNCH /
+    // KERNEL_LAUNCH_EX）用 cudaLaunchKernel；Driver 的 cuLaunchKernel
+    // 必须用 cuLaunchKernel，因为 func 是 CUfunction，不是 host entry。
+    if (op->type == OperationType::KERNEL_LAUNCH_DRV) {
+        if (!g_real_funcs.initialized) init_real_functions();
+        if (!g_real_funcs.cuLaunchKernel) {
+            LOG_ERROR("cuLaunchKernel symbol unavailable");
+            return cudaErrorUnknown;
+        }
+        CUresult cr = g_real_funcs.cuLaunchKernel(
+            reinterpret_cast<CUfunction>(const_cast<void*>(p.func)),
+            p.gridDim.x, p.gridDim.y, p.gridDim.z,
+            p.blockDim.x, p.blockDim.y, p.blockDim.z,
+            static_cast<unsigned>(p.sharedMem),
+            reinterpret_cast<CUstream>(stream_to_use),
+            args, nullptr
+        );
+        return cr == CUDA_SUCCESS ? cudaSuccess : cudaErrorUnknown;
+    }
+
+    GET_REAL_FUNC(cudaLaunchKernel);
+    // KERNEL_LAUNCH 与 KERNEL_LAUNCH_EX 都走 cudaLaunchKernel：ExC 路径的
+    // attrs（cluster 等）在 Orion 的 ISOLATED / GC 语义下没有额外影响，
+    // 归一化到 cudaLaunchKernel 能直接复用现有 real_func。
     cudaError_t result = g_real_funcs.cudaLaunchKernel(
         p.func, p.gridDim, p.blockDim,
         args,
@@ -494,7 +542,10 @@ cudaError_t execute_cuda_operation(OperationPtr op, cudaStream_t scheduler_strea
             result = execute_memset(op, scheduler_stream);
             break;
         case OperationType::KERNEL_LAUNCH:
-            LOG_DEBUG("Entering execute_kernel_launch with stream=%p", scheduler_stream);
+        case OperationType::KERNEL_LAUNCH_EX:
+        case OperationType::KERNEL_LAUNCH_DRV:
+            LOG_DEBUG("Entering execute_kernel_launch (type=%s) with stream=%p",
+                      op_type_name(op->type), scheduler_stream);
             result = execute_kernel_launch(op, scheduler_stream);
             LOG_DEBUG("execute_kernel_launch returned %d", (int)result);
             break;
@@ -644,8 +695,8 @@ cudaError_t cudaMalloc(void** devPtr, size_t size) {
     if (!is_capture_enabled()) {
         return real_cudaMalloc(devPtr, size);
     }
-    
-    int client_idx = get_current_client_idx();
+
+    int client_idx = resolve_client_idx();
     if (client_idx < 0) {
         return real_cudaMalloc(devPtr, size);
     }
@@ -673,7 +724,7 @@ cudaError_t cudaFree(void* devPtr) {
     SAFE_PASSTHROUGH(cudaFree, devPtr);
     
     if (!is_capture_enabled()) return real_cudaFree(devPtr);
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx();
     if (client_idx < 0) return real_cudaFree(devPtr);
     
     auto op = create_operation(client_idx, OperationType::FREE);
@@ -703,7 +754,7 @@ cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
     SAFE_PASSTHROUGH(cudaMemcpy, dst, src, count, kind);
     
     if (!is_capture_enabled()) return real_cudaMemcpy(dst, src, count, kind);
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx();
     if (client_idx < 0) return real_cudaMemcpy(dst, src, count, kind);
     
     auto op = create_operation(client_idx, OperationType::MEMCPY);
@@ -734,7 +785,7 @@ cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count,
     SAFE_PASSTHROUGH(cudaMemcpyAsync, dst, src, count, kind, stream);
     
     if (!is_capture_enabled()) return real_cudaMemcpyAsync(dst, src, count, kind, stream);
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(stream);
     if (client_idx < 0) return real_cudaMemcpyAsync(dst, src, count, kind, stream);
     
     auto op = create_operation(client_idx, OperationType::MEMCPY_ASYNC);
@@ -762,7 +813,7 @@ cudaError_t cudaMemset(void* devPtr, int value, size_t count) {
     SAFE_PASSTHROUGH(cudaMemset, devPtr, value, count);
     
     if (!is_capture_enabled()) return real_cudaMemset(devPtr, value, count);
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx();
     if (client_idx < 0) return real_cudaMemset(devPtr, value, count);
     
     auto op = create_operation(client_idx, OperationType::MEMSET);
@@ -791,7 +842,7 @@ cudaError_t cudaMemsetAsync(void* devPtr, int value, size_t count, cudaStream_t 
     SAFE_PASSTHROUGH(cudaMemsetAsync, devPtr, value, count, stream);
     
     if (!is_capture_enabled()) return real_cudaMemsetAsync(devPtr, value, count, stream);
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(stream);
     if (client_idx < 0) return real_cudaMemsetAsync(devPtr, value, count, stream);
     
     auto op = create_operation(client_idx, OperationType::MEMSET_ASYNC);
@@ -837,7 +888,7 @@ cudaError_t cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
     SAFE_PASSTHROUGH(cudaLaunchKernel, func, gridDim, blockDim, args, sharedMem, stream);
 
     if (!is_capture_enabled()) return real_cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(stream);
     if (client_idx < 0) return real_cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
 
     // 使用新接口避免竞态条件
@@ -873,8 +924,122 @@ cudaError_t cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
     return op->result;
 }
 
-/**
- * @brief cudaDeviceSynchronize 拦截 wrapper
+// ============================================================================
+// Step C：cudaLaunchKernelExC / cudaLaunchKernelEx 拦截
+// ============================================================================
+// PyTorch / CUDA Graph / cooperative launch 会走 cudaLaunchKernelEx 路径，
+// 它通过 cudaLaunchConfig_t 带 gridDim/blockDim/dynamicSmemBytes/stream/attrs。
+// attrs（cluster 等）对 Orion 调度语义无关，这里忽略；但 stream 和三维
+// 维度必须准确保留。
+// ----------------------------------------------------------------------------
+cudaError_t cudaLaunchKernelExC(const cudaLaunchConfig_t* config,
+                                const void* func, void** args) {
+    using namespace orion;
+
+    SAFE_PASSTHROUGH(cudaLaunchKernelExC, config, func, args);
+
+    if (!is_capture_enabled() || config == nullptr) {
+        GET_REAL_FUNC(cudaLaunchKernelExC);
+        return g_real_funcs.cudaLaunchKernelExC(config, func, args);
+    }
+
+    int client_idx = resolve_client_idx(config->stream);
+    if (client_idx < 0) {
+        GET_REAL_FUNC(cudaLaunchKernelExC);
+        return g_real_funcs.cudaLaunchKernelExC(config, func, args);
+    }
+
+    auto op = create_operation(client_idx, OperationType::KERNEL_LAUNCH_EX);
+    if (!op) {
+        GET_REAL_FUNC(cudaLaunchKernelExC);
+        return g_real_funcs.cudaLaunchKernelExC(config, func, args);
+    }
+
+    KernelLaunchParams kp;
+    kp.func          = func;
+    kp.gridDim       = config->gridDim;
+    kp.blockDim      = config->blockDim;
+    kp.sharedMem     = config->dynamicSmemBytes;
+    kp.stream        = config->stream;
+    kp.original_args = args;
+    kp.use_deep_copy = false;
+
+    op->params = std::move(kp);
+    enqueue_operation(op);
+    wait_operation(op);
+    return op->result;
+}
+
+// ============================================================================
+// Step C：cuLaunchKernel driver API 拦截
+// ============================================================================
+// Triton / NCCL / cuGraph 大量走 driver API。参数顺序：
+//   cuLaunchKernel(f, gx, gy, gz, bx, by, bz, sharedMem, stream,
+//                  kernelParams, extra)
+// extra 极少用到（只有少数 runtime fallback 场景），这里透传但不参与深拷贝。
+// ----------------------------------------------------------------------------
+CUresult cuLaunchKernel(CUfunction f,
+                        unsigned gridDimX, unsigned gridDimY, unsigned gridDimZ,
+                        unsigned blockDimX, unsigned blockDimY, unsigned blockDimZ,
+                        unsigned sharedMemBytes, CUstream hStream,
+                        void** kernelParams, void** extra) {
+    using namespace orion;
+
+    SAFE_PASSTHROUGH_DRV(cuLaunchKernel, f, gridDimX, gridDimY, gridDimZ,
+                         blockDimX, blockDimY, blockDimZ,
+                         sharedMemBytes, hStream, kernelParams, extra);
+
+    if (!is_capture_enabled()) {
+        if (!g_real_funcs.initialized) init_real_functions();
+        if (!g_real_funcs.cuLaunchKernel) return CUDA_ERROR_UNKNOWN;
+        return g_real_funcs.cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ,
+                                           blockDimX, blockDimY, blockDimZ,
+                                           sharedMemBytes, hStream,
+                                           kernelParams, extra);
+    }
+
+    // driver stream 和 runtime stream 在当前 CUDA 版本中 ABI 一致，
+    // resolve_client_idx 直接按指针匹配即可。
+    cudaStream_t rt_stream = reinterpret_cast<cudaStream_t>(hStream);
+    int client_idx = resolve_client_idx(rt_stream);
+    if (client_idx < 0 || extra != nullptr) {
+        // extra 参数罕见，且我们没有把它存进 KernelLaunchParams，遇到时
+        // 不走队列，直接透传，避免丢信息。
+        if (!g_real_funcs.initialized) init_real_functions();
+        if (!g_real_funcs.cuLaunchKernel) return CUDA_ERROR_UNKNOWN;
+        return g_real_funcs.cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ,
+                                           blockDimX, blockDimY, blockDimZ,
+                                           sharedMemBytes, hStream,
+                                           kernelParams, extra);
+    }
+
+    auto op = create_operation(client_idx, OperationType::KERNEL_LAUNCH_DRV);
+    if (!op) {
+        if (!g_real_funcs.initialized) init_real_functions();
+        if (!g_real_funcs.cuLaunchKernel) return CUDA_ERROR_UNKNOWN;
+        return g_real_funcs.cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ,
+                                           blockDimX, blockDimY, blockDimZ,
+                                           sharedMemBytes, hStream,
+                                           kernelParams, extra);
+    }
+
+    KernelLaunchParams kp;
+    kp.func          = reinterpret_cast<const void*>(f);
+    kp.gridDim       = dim3(gridDimX, gridDimY, gridDimZ);
+    kp.blockDim      = dim3(blockDimX, blockDimY, blockDimZ);
+    kp.sharedMem     = sharedMemBytes;
+    kp.stream        = rt_stream;
+    kp.original_args = kernelParams;
+    kp.use_deep_copy = false;
+
+    op->params = std::move(kp);
+    enqueue_operation(op);
+    wait_operation(op);
+    // 把 runtime 错误码翻回 driver 错误码：成功走 CUDA_SUCCESS，其余一律
+    // ERROR_UNKNOWN（调度器已经在执行端用 cuLaunchKernel，就按它返回）。
+    return op->result == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+}
+
  *
  * 拦截设备级同步操作。这是显式同步操作，需要等待所有之前的操作完成。
  *
@@ -890,7 +1055,7 @@ cudaError_t cudaDeviceSynchronize(void) {
     SAFE_PASSTHROUGH(cudaDeviceSynchronize);
     
     if (!is_capture_enabled()) return real_cudaDeviceSynchronize();
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx();
     if (client_idx < 0) return real_cudaDeviceSynchronize();
     
     // 在异步模式下，需要等待队列中所有操作完成
@@ -920,7 +1085,7 @@ cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
     SAFE_PASSTHROUGH(cudaStreamSynchronize, stream);
     
     if (!is_capture_enabled()) return real_cudaStreamSynchronize(stream);
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(stream);
     if (client_idx < 0) return real_cudaStreamSynchronize(stream);
     
     auto op = create_operation(client_idx, OperationType::STREAM_SYNC);

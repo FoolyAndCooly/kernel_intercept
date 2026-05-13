@@ -613,7 +613,7 @@ cublasStatus_t cublasSgemm_v2(
                                     alpha, A, lda, B, ldb, beta, C, ldc);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return real_cublasSgemm_v2(handle, transa, transb, m, n, k,
                                     alpha, A, lda, B, ldb, beta, C, ldc);
@@ -730,7 +730,7 @@ cublasStatus_t cublasSgemmBatched(
                                         alpha, A, lda, B, ldb, beta, C, ldc, batchCount);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return real_cublasSgemmBatched(handle, transa, transb, m, n, k,
                                         alpha, A, lda, B, ldb, beta, C, ldc, batchCount);
@@ -805,7 +805,7 @@ cublasStatus_t cublasSgemmStridedBatched(
                                                beta, C, ldc, strideC, batchCount);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return real_cublasSgemmStridedBatched(handle, transa, transb, m, n, k,
                                                alpha, A, lda, strideA, B, ldb, strideB,
@@ -927,7 +927,7 @@ cublasStatus_t cublasGemmEx(
                                             beta, C, Ctype, ldc, computeType, algo);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return g_cublas_funcs.cublasGemmEx(handle, transa, transb, m, n, k,
                                             alpha, A, Atype, lda, B, Btype, ldb,
@@ -1002,7 +1002,7 @@ cublasStatus_t cublasGemmStridedBatchedEx(
             beta, C, Ctype, ldc, strideC, batchCount, computeType, algo);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return g_cublas_funcs.cublasGemmStridedBatchedEx(
             handle, transa, transb, m, n, k, alpha,
@@ -1071,7 +1071,7 @@ cublasStatus_t cublasHgemm(
                                            alpha, A, lda, B, ldb, beta, C, ldc);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return g_cublas_funcs.cublasHgemm(handle, transa, transb, m, n, k,
                                            alpha, A, lda, B, ldb, beta, C, ldc);
@@ -1140,7 +1140,7 @@ cublasStatus_t cublasHgemmStridedBatched(
             A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return g_cublas_funcs.cublasHgemmStridedBatched(
             handle, transa, transb, m, n, k, alpha,
@@ -1210,7 +1210,7 @@ cublasStatus_t cublasSgemmEx(
                                              beta, C, Ctype, ldc);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return g_cublas_funcs.cublasSgemmEx(handle, transa, transb, m, n, k,
                                              alpha, A, Atype, lda, B, Btype, ldb,
@@ -1278,12 +1278,18 @@ cublasStatus_t cublasSetStream_v2(cublasHandle_t handle, cudaStream_t streamId) 
     }
     
     // 检查是否有活跃的 client
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         LOG_DEBUG("cublasSetStream_v2 passthrough (no client): stream %p", streamId);
         return g_cublas_funcs.cublasSetStream_v2(handle, streamId);
     }
-    
+
+    // Step B：PyTorch 第一次把 handle 绑到 stream 时，登记 handle→client 以及
+    // user-stream→client 的映射。这样即便后续 cuBLAS 内部 worker 线程没有
+    // tl_client_idx，也能通过 handle / stream 回查到 client 归属。
+    orion::register_client_handle(client_idx, (void*)handle);
+    if (streamId) orion::register_client_stream(client_idx, (void*)streamId);
+
     // 调度器启用时，忽略 PyTorch 的 stream 设置
     // 关键：主动把 cuBLAS handle 的 stream 设为 null，清除 warmup 阶段设置的 stream
     // 这样调度器执行时才能正确设置自己的 stream
@@ -1366,7 +1372,7 @@ cublasStatus_t cublasLtMatmul(
     }
     
     // 检查是否有活跃的 client
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx((void*)stream, (void*)lightHandle);
     if (client_idx < 0) {
         return g_cublaslt_funcs.cublasLtMatmul(
             lightHandle, computeDesc, alpha, A, Adesc, B, Bdesc,

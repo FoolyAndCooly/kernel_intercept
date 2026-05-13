@@ -339,6 +339,14 @@ bool is_managed_thread();
 bool is_capture_enabled();
 void set_capture_enabled(bool enabled);
 
+// Stream / handle → client_idx 映射（Step B）
+// 客户端线程通过 set_current_client_idx 走 thread-local 快路径；
+// 对于 cuDNN/cuBLAS 内部 worker 线程，按 stream 或 handle 反查 client。
+void register_client_stream(int client_idx, void* stream);
+void register_client_handle(int client_idx, void* handle);
+int  resolve_client_idx(void* stream = nullptr, void* handle = nullptr);
+void clear_client_maps();
+
 // 异步模式控制
 void set_async_mode_internal(int mode);
 int get_async_mode_internal();
@@ -357,6 +365,12 @@ void orion_set_client_idx(int idx);
 int orion_get_client_idx();
 void orion_set_enabled(int enabled);
 int orion_is_enabled();
+
+// Step A 别名 + Step B 新接口
+int  orion_set_capture(int enabled);
+void orion_register_client_stream(int client_idx, void* stream);
+void orion_register_client_handle(int client_idx, void* handle);
+int  orion_resolve_client_idx(void* stream, void* handle);
 
 }
 

@@ -10,7 +10,10 @@
 #include "gpu_capture.h"
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <shared_mutex>
 #include <thread>
+#include <unordered_map>
 
 namespace orion {
 
@@ -25,6 +28,46 @@ LogLevel g_log_level = LogLevel::INFO;
 static thread_local int tl_client_idx = -1;
 thread_local bool tl_is_scheduler_thread = false;
 thread_local bool tl_in_scheduler_execution = false;
+
+// ----------------------------------------------------------------------------
+// Stream / handle → client_idx 映射（Step B：供库内部线程回查 client）
+// 这里先提供存储和查询实现，wrapper 在 Step B 切换到 resolve_client_idx()。
+// ----------------------------------------------------------------------------
+static std::unordered_map<void*, int> g_stream_to_client;
+static std::unordered_map<void*, int> g_handle_to_client;
+static std::shared_mutex              g_client_map_mutex;
+
+void register_client_stream(int client_idx, void* stream) {
+    if (client_idx < 0 || stream == nullptr) return;
+    std::unique_lock lk(g_client_map_mutex);
+    g_stream_to_client[stream] = client_idx;
+}
+
+void register_client_handle(int client_idx, void* handle) {
+    if (client_idx < 0 || handle == nullptr) return;
+    std::unique_lock lk(g_client_map_mutex);
+    g_handle_to_client[handle] = client_idx;
+}
+
+int resolve_client_idx(void* stream, void* handle) {
+    if (tl_client_idx >= 0) return tl_client_idx;
+    std::shared_lock lk(g_client_map_mutex);
+    if (stream) {
+        auto it = g_stream_to_client.find(stream);
+        if (it != g_stream_to_client.end()) return it->second;
+    }
+    if (handle) {
+        auto it = g_handle_to_client.find(handle);
+        if (it != g_handle_to_client.end()) return it->second;
+    }
+    return -1;
+}
+
+void clear_client_maps() {
+    std::unique_lock lk(g_client_map_mutex);
+    g_stream_to_client.clear();
+    g_handle_to_client.clear();
+}
 
 // ============================================================================
 // 日志初始化
@@ -209,6 +252,25 @@ int orion_get_client_idx() {
 
 void orion_set_enabled(int enabled) {
     orion::set_capture_enabled(enabled != 0);
+}
+
+// 别名：方案文档里使用 orion_set_capture，保留 orion_set_enabled 作为旧名
+int orion_set_capture(int enabled) {
+    orion::set_capture_enabled(enabled != 0);
+    return 0;
+}
+
+// Step B 预备：供 Python / 调度器显式登记 stream/handle 与 client 的映射
+void orion_register_client_stream(int client_idx, void* stream) {
+    orion::register_client_stream(client_idx, stream);
+}
+
+void orion_register_client_handle(int client_idx, void* handle) {
+    orion::register_client_handle(client_idx, handle);
+}
+
+int orion_resolve_client_idx(void* stream, void* handle) {
+    return orion::resolve_client_idx(stream, handle);
 }
 
 int orion_is_enabled() {

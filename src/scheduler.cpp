@@ -389,6 +389,29 @@ bool Scheduler::init_green_contexts(const GreenCtxConfig& gc_config) {
     }
     LOG_INFO("BE Green Context: %u SMs, stream + cuBLAS handle created", actual_be);
 
+    // Step A: dummy prime —— 在每个 GC context 下预跑一次小 kernel，
+    // 提前触发 CUDA module loader / JIT cache / cuBLAS workspace 分配，
+    // 避免首个真实 workload op 把冷启动开销计入测时段。
+    auto prime_ctx = [&](int ctx_idx, cudaStream_t s) {
+        if (cuCtxSetCurrent(cuda_ctxs_[ctx_idx]) != CUDA_SUCCESS) return;
+        void* dummy = nullptr;
+        if (cudaMalloc(&dummy, 16) != cudaSuccess) return;
+        cudaMemsetAsync(dummy, 0, 16, s);
+        // 触发 cuBLAS 内部 workspace 初始化：1x1 的 sgemm
+        cublasHandle_t h = cublas_handles_[ctx_idx];
+        if (h) {
+            cublasSetStream(h, s);
+            float a = 0.f, b = 0.f, c = 0.f;
+            float alpha = 1.f, beta = 0.f;
+            cublasSgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, 1, 1, 1,
+                        &alpha, &a, 1, &b, 1, &beta, &c, 1);
+        }
+        cudaStreamSynchronize(s);
+        cudaFree(dummy);
+    };
+    prime_ctx(0, hp_gc_stream_);
+    prime_ctx(1, be_gc_streams_[0]);
+
     // Step 7: 恢复 primary context（启动时默认 ISOLATED 模式直接用 GC）
     CHECK_CU(cuCtxSetCurrent(primary_ctx_));
 

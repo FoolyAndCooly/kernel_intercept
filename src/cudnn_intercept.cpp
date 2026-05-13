@@ -142,6 +142,10 @@ using cudnnBatchNormalizationBackward_t = cudnnStatus_t (*)(
     cudnnTensorDescriptor_t, void*, cudnnTensorDescriptor_t, const void*,
     void*, void*, double, const void*, const void*);
 
+// Step B：拦截 cudnnSetStream，维护 handle↔stream↔client 映射
+using cudnnSetStream_t  = cudnnStatus_t (*)(cudnnHandle_t, cudaStream_t);
+using cudnnGetStream_t  = cudnnStatus_t (*)(cudnnHandle_t, cudaStream_t*);
+
 // ============================================================================
 // 真实函数指针存储
 // ============================================================================
@@ -161,6 +165,8 @@ static struct {
     cudnnBatchNormalizationForwardTraining_t cudnnBatchNormalizationForwardTraining;
     cudnnBatchNormalizationForwardInference_t cudnnBatchNormalizationForwardInference;
     cudnnBatchNormalizationBackward_t cudnnBatchNormalizationBackward;
+    cudnnSetStream_t cudnnSetStream;
+    cudnnGetStream_t cudnnGetStream;
     bool initialized;           // 是否已初始化
     std::mutex init_mutex;      // 保护初始化过程的互斥锁
 } g_cudnn_funcs = {nullptr};
@@ -211,6 +217,12 @@ static void init_cudnn_functions() {
         (cudnnBatchNormalizationForwardInference_t)get_cudnn_func("cudnnBatchNormalizationForwardInference");
     g_cudnn_funcs.cudnnBatchNormalizationBackward =
         (cudnnBatchNormalizationBackward_t)get_cudnn_func("cudnnBatchNormalizationBackward");
+
+    // Step B：stream 绑定观测
+    g_cudnn_funcs.cudnnSetStream =
+        (cudnnSetStream_t)get_cudnn_func("cudnnSetStream");
+    g_cudnn_funcs.cudnnGetStream =
+        (cudnnGetStream_t)get_cudnn_func("cudnnGetStream");
 
     g_cudnn_funcs.initialized = true;
     LOG_DEBUG("cuDNN functions initialized");
@@ -434,7 +446,7 @@ cudnnStatus_t cudnnConvolutionForward(
             algo, workSpace, workSpaceSizeInBytes, beta, yDesc, y);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return real_cudnnConvolutionForward(
             handle, alpha, xDesc, x, wDesc, w, convDesc,
@@ -503,7 +515,7 @@ cudnnStatus_t cudnnConvolutionBackwardData(
             algo, workSpace, workSpaceSizeInBytes, beta, dxDesc, dx);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return real_cudnnConvolutionBackwardData(
             handle, alpha, wDesc, w, dyDesc, dy, convDesc,
@@ -572,7 +584,7 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(
             algo, workSpace, workSpaceSizeInBytes, beta, dwDesc, dw);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return real_cudnnConvolutionBackwardFilter(
             handle, alpha, xDesc, x, dyDesc, dy, convDesc,
@@ -655,7 +667,7 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
             epsilon, resultSaveMean, resultSaveInvVariance);
     }
     
-    int client_idx = get_current_client_idx();
+    int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
         return real_cudnnBatchNormalizationForwardTraining(
             handle, mode, alpha, beta, xDesc, x, yDesc, y,
@@ -691,6 +703,37 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
     
     wait_operation(op);
     return op->result == cudaSuccess ? CUDNN_STATUS_SUCCESS : 1;
+}
+
+// ============================================================================
+// Step B: cudnnSetStream 拦截
+// ============================================================================
+// PyTorch / cuDNN 会在每个 handle 上调用 cudnnSetStream 把 handle 绑到用户
+// stream。拦截此调用是为了：
+//   1) 记录 handle↔client 的映射，让 cuDNN 内部 worker 线程（没有
+//      tl_client_idx）在发 launch 时仍能通过 handle 反查到 client 归属；
+//   2) 顺带把传入的 stream 也登记到 stream→client 映射，覆盖 capture 启用
+//      前就已经创建、但没走 register_client_stream 的 stream。
+// 行为：始终透传到真实 cudnnSetStream，不改写其语义。调度器执行 op 时会
+// 通过 cudnnSetStream 自己再把 handle 绑到调度器 stream，不影响这里。
+// ----------------------------------------------------------------------------
+cudnnStatus_t cudnnSetStream(cudnnHandle_t handle, cudaStream_t streamId) {
+    using namespace orion;
+    if (!g_cudnn_funcs.initialized) init_cudnn_functions();
+    if (!g_cudnn_funcs.cudnnSetStream) {
+        return (cudnnStatus_t)1;  // CUDNN_STATUS_NOT_INITIALIZED
+    }
+
+    // 仅在调度器已初始化且有明确 client 归属时登记映射
+    if (g_capture_state.initialized.load()) {
+        int client_idx = resolve_client_idx((void*)streamId, (void*)handle);
+        if (client_idx >= 0) {
+            register_client_handle(client_idx, (void*)handle);
+            if (streamId) register_client_stream(client_idx, (void*)streamId);
+        }
+    }
+
+    return g_cudnn_funcs.cudnnSetStream(handle, streamId);
 }
 
 } // extern "C"

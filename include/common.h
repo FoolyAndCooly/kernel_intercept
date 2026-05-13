@@ -60,6 +60,8 @@ constexpr int MAX_CLIENTS = 16;
 enum class OperationType : uint8_t {
     // === Kernel 启动 ===
     KERNEL_LAUNCH = 0,      // cudaLaunchKernel - 原生 CUDA kernel 启动
+    KERNEL_LAUNCH_EX,       // cudaLaunchKernelExC / cudaLaunchKernelEx (Runtime API)
+    KERNEL_LAUNCH_DRV,      // cuLaunchKernel / cuLaunchKernelEx (Driver API)
 
     // === 内存管理 ===
     MALLOC,                 // cudaMalloc - GPU 内存分配
@@ -127,6 +129,8 @@ enum class ProfileType : uint8_t {
 inline const char* op_type_name(OperationType type) {
     switch (type) {
         case OperationType::KERNEL_LAUNCH: return "KERNEL_LAUNCH";
+        case OperationType::KERNEL_LAUNCH_EX: return "KERNEL_LAUNCH_EX";
+        case OperationType::KERNEL_LAUNCH_DRV: return "KERNEL_LAUNCH_DRV";
         case OperationType::MALLOC: return "MALLOC";
         case OperationType::FREE: return "FREE";
         case OperationType::MEMCPY: return "MEMCPY";

@@ -170,6 +170,16 @@ def load_library():
     lib.orion_autotune_green_ctx.argtypes = []
     lib.orion_autotune_green_ctx.restype = ctypes.c_int
 
+    # Step A/B: capture 开关 + stream→client 注册
+    lib.orion_set_capture.argtypes = [ctypes.c_int]
+    lib.orion_set_capture.restype = ctypes.c_int
+    lib.orion_set_enabled.argtypes = [ctypes.c_int]
+    lib.orion_set_enabled.restype = None
+    lib.orion_register_client_stream.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    lib.orion_register_client_stream.restype = None
+    lib.orion_register_client_handle.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    lib.orion_register_client_handle.restype = None
+
     print("Library loaded successfully")
     return lib
 
@@ -198,6 +208,10 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     if ret != 0:
         print("ERROR: Failed to initialize scheduler")
         return None
+
+    # Step A：模型构造 / kernel profile 加载期间先关闭 capture，避免把一次性初始化
+    # 操作（module 拷贝、cuDNN handle 首次绑定等）当成真正的 workload 入队。
+    lib.orion_set_capture(0)
 
     if sm_threshold is not None:
         lib.orion_set_sm_threshold(sm_threshold)
@@ -253,13 +267,10 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     lib.orion_start_scheduler_thread()
     print(f"Scheduler started with {num_clients} clients")
 
-    # Warmup（必须在调度器启动之后）
-    print("\nWarmup...")
-    for i in range(num_clients):
-        lib.orion_set_client_idx(i)
-        with torch.no_grad():
-            _ = models[i](inputs[i])
-    torch.cuda.synchronize()
+    # Step A：调度器就绪后再开启 capture。后续的 warmup 发生在 worker 线程内部，
+    # 此时 cuDNN/cuBLAS 的 handle 会在 GC context 下首次建立，从而把冷启动开销
+    # 算到预热段而不是真正的测时段。
+    lib.orion_set_capture(1)
 
     # ========================================================================
     # 时间测量说明
@@ -270,6 +281,12 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     # - orion_sync_client_stream(idx) 只同步该客户端的 stream
     # ========================================================================
     streams = [torch.cuda.Stream() for _ in range(num_clients)]
+
+    # Step B：登记 stream→client 映射，供 cuDNN/cuBLAS 内部 worker 线程
+    # 在 resolve_client_idx 里命中 client 归属。
+    for i, s in enumerate(streams):
+        lib.orion_register_client_stream(i, ctypes.c_void_p(s.cuda_stream))
+
     barrier = threading.Barrier(num_clients)
     start = threading.Event()
     done = [threading.Event() for _ in range(num_clients)]
@@ -287,6 +304,14 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
 
         lib.orion_set_client_idx(idx)
         client_type = "HP" if idx == 0 else f"BE{idx}"
+
+        # Step A：在 capture 已启用的前提下做一次 warmup，
+        # 让 cuDNN/cuBLAS 的 plan cache、workspace、module loader 提前预热，
+        # 避免第一次真正推理时碰到冷启动开销（~7 ms）。
+        with torch.cuda.stream(streams[idx]):
+            with torch.no_grad():
+                _ = models[idx](inputs[idx])
+        lib.orion_sync_client_stream(idx)
 
         # 等待所有线程同时开始
         start.wait()
