@@ -330,11 +330,14 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
             with torch.cuda.stream(streams[idx]):
                 with torch.no_grad():
                     _ = models[idx](inputs[idx])
+            lib.orion_sync_client_stream(idx)
         else:
             # Green Context 模式：使用 default stream，Orion 会自动路由
             with torch.no_grad():
                 _ = models[idx](inputs[idx])
-        lib.orion_sync_client_stream(idx)
+            # Green Context 模式下使用 torch.cuda.synchronize() 而不是 orion_sync_client_stream
+            # 因为 GC stream 在不同的 CUDA context 中，直接同步会阻塞
+            torch.cuda.synchronize()
 
         # 等待所有线程同时开始
         start.wait()
@@ -352,14 +355,14 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
                 with torch.no_grad():
                     for i in range(num_iters):
                         _ = models[idx](inputs[idx])
+            lib.orion_sync_client_stream(idx)
         else:
             # Green Context 模式：使用 default stream，Orion 会自动路由
             with torch.no_grad():
                 for i in range(num_iters):
                     _ = models[idx](inputs[idx])
-
-        # 只同步该客户端的 stream（不是全局同步）
-        lib.orion_sync_client_stream(idx)
+            # Green Context 模式下使用 torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
         # 结束计时
         t1 = time.time()
