@@ -285,9 +285,24 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
 
     # ========================================================================
     # 串行 Warmup（在主线程上依次执行）
-    # cuDNN 首次卷积会做算法 benchmark，多线程并发 warmup 会导致死锁。
+    #
+    # 问题：Green Context 创建后，SM 已被分区（如 HP=24, BE=80）。
+    # cuDNN 的 algorithm benchmark 需要完整 GPU 资源来测试各算法性能，
+    # 在资源受限环境下会卡死。GPT 使用 cuBLAS 不做 benchmark 所以成功。
+    #
+    # 解决：禁用 cuDNN benchmark，使用默认算法（类似 GPT 的 cuBLAS）。
     # ========================================================================
     print("\nSerial warmup (main thread)...")
+
+    # 保存原始设置
+    original_benchmark = torch.backends.cudnn.benchmark
+    original_deterministic = torch.backends.cudnn.deterministic
+
+    # 禁用 cuDNN benchmark，避免在 Green Context 创建后卡死
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    print("  cuDNN benchmark disabled for warmup (using default algorithms)")
+
     for idx in range(num_clients):
         client_type = "HP" if idx == 0 else f"BE{idx}"
         print(f"  Warming up {client_type} (client {idx})...")
@@ -295,6 +310,11 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
             _ = models[idx](inputs[idx])
         torch.cuda.synchronize()
         print(f"  {client_type} warmup done")
+
+    # 恢复原始设置（正式执行时可以启用 benchmark）
+    torch.backends.cudnn.benchmark = original_benchmark
+    torch.backends.cudnn.deterministic = original_deterministic
+    print("  cuDNN settings restored")
 
     def worker(idx):
         """客户端工作线程（仅执行，warmup 已在主线程完成）"""
