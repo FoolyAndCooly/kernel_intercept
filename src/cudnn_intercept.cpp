@@ -448,15 +448,25 @@ cudnnStatus_t cudnnConvolutionForward(
     
     int client_idx = resolve_client_idx(nullptr, (void*)handle);
     if (client_idx < 0) {
+        LOG_INFO("[CUDNN] cudnnConvolutionForward: client_idx < 0, bypassing");
         return real_cudnnConvolutionForward(
             handle, alpha, xDesc, x, wDesc, w, convDesc,
             algo, workSpace, workSpaceSizeInBytes, beta, yDesc, y);
     }
-    
-    LOG_TRACE("Client %d: cudnnConvolutionForward", client_idx);
-    
+
+    if (client_idx == 1) {
+        LOG_INFO("[CUDNN] Client 1: cudnnConvolutionForward intercepted");
+    }
+
     auto op = submit_operation(client_idx, OperationType::CUDNN_CONV_FWD);
-    if (!op) return 1;
+    if (!op) {
+        LOG_INFO("[CUDNN] Client %d: submit_operation returned nullptr!", client_idx);
+        return 1;
+    }
+
+    if (client_idx == 1) {
+        LOG_INFO("[CUDNN] Client 1: op created, op_id=%lu", op->op_id);
+    }
     
     CudnnConvParams p;
     p.handle = handle;
