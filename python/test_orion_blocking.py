@@ -331,21 +331,28 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
         # Step A：在 capture 已启用的前提下做一次 warmup，
         # 让 cuDNN/cuBLAS 的 plan cache、workspace、module loader 提前预热，
         # 避免第一次真正推理时碰到冷启动开销（~7 ms）。
-        if streams[idx] is not None:
-            # DEFAULT 模式：使用指定的 PyTorch stream
-            with torch.cuda.stream(streams[idx]):
+        try:
+            if streams[idx] is not None:
+                # DEFAULT 模式：使用指定的 PyTorch stream
+                with torch.cuda.stream(streams[idx]):
+                    with torch.no_grad():
+                        _ = models[idx](inputs[idx])
+                lib.orion_sync_client_stream(idx)
+            else:
+                # Green Context 模式：使用 default stream，Orion 会自动路由
+                print(f"[DEBUG] Worker {idx} calling model forward")
                 with torch.no_grad():
                     _ = models[idx](inputs[idx])
-            lib.orion_sync_client_stream(idx)
-        else:
-            # Green Context 模式：使用 default stream，Orion 会自动路由
-            with torch.no_grad():
-                _ = models[idx](inputs[idx])
-            # Green Context 模式下使用 torch.cuda.synchronize() 而不是 orion_sync_client_stream
-            # 因为 GC stream 在不同的 CUDA context 中，直接同步会阻塞
-            print(f"[DEBUG] Worker {idx} warmup done, calling synchronize")
-            torch.cuda.synchronize()
-            print(f"[DEBUG] Worker {idx} synchronize done")
+                # Green Context 模式下使用 torch.cuda.synchronize() 而不是 orion_sync_client_stream
+                # 因为 GC stream 在不同的 CUDA context 中，直接同步会阻塞
+                print(f"[DEBUG] Worker {idx} warmup done, calling synchronize")
+                torch.cuda.synchronize()
+                print(f"[DEBUG] Worker {idx} synchronize done")
+        except Exception as e:
+            print(f"[ERROR] Worker {idx} warmup failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return
 
         print(f"[DEBUG] Worker {idx} warmup complete, waiting for start signal")
 
