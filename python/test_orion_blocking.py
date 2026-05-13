@@ -267,10 +267,10 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     lib.orion_start_scheduler_thread()
     print(f"Scheduler started with {num_clients} clients")
 
-    # Step A：调度器就绪后再开启 capture。后续的 warmup 发生在 worker 线程内部，
-    # 此时 cuDNN/cuBLAS 的 handle 会在 GC context 下首次建立，从而把冷启动开销
-    # 算到预热段而不是真正的测时段。
-    lib.orion_set_capture(1)
+    # 注意：这里不启用 capture。让 worker 线程先在主 context 上完成
+    # PyTorch/cuDNN/cuBLAS 的初始化（handle 创建、conv 算法 benchmark、workspace
+    # 分配等），这些初始化涉及 Green Context 无法正确处理的内部同步。
+    # warmup 结束后、barrier 之前，由主线程统一打开 capture。
 
     # ========================================================================
     # 时间测量说明
@@ -301,6 +301,7 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
 
     barrier = threading.Barrier(num_clients)
     start = threading.Event()
+    warmup_done = [threading.Event() for _ in range(num_clients)]
     done = [threading.Event() for _ in range(num_clients)]
     client_times = [0.0] * num_clients
     client_start_times = [0.0] * num_clients
@@ -356,7 +357,10 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
 
         print(f"[DEBUG] Worker {idx} warmup complete, waiting for start signal")
 
-        # 等待所有线程同时开始
+        # 通知主线程：本 worker warmup 完成
+        warmup_done[idx].set()
+
+        # 等待所有线程同时开始（主线程会在确认所有 worker warmup 完成后打开 capture 再发信号）
         start.wait()
         print(f"[DEBUG] Worker {idx} got start signal, waiting at barrier")
         barrier.wait()
@@ -395,6 +399,17 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_clients)]
     for t in threads:
         t.start()
+
+    # 等待所有 worker 完成 warmup（在主 context 上完成 PyTorch/cuDNN/cuBLAS 初始化）
+    print("\nWaiting for all workers to complete warmup...")
+    for i, event in enumerate(warmup_done):
+        event.wait()
+        print(f"  Worker {i} warmup done")
+
+    # 所有 worker warmup 完成后，打开 capture
+    print("\nAll workers warmed up, enabling capture...")
+    lib.orion_set_capture(1)
+    print("Capture enabled")
 
     time.sleep(0.2)
 
