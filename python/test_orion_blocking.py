@@ -306,10 +306,18 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     for idx in range(num_clients):
         client_type = "HP" if idx == 0 else f"BE{idx}"
         print(f"  Warming up {client_type} (client {idx})...")
+        print(f"    [DEBUG] About to call model forward...")
+        import sys
+        sys.stdout.flush()
+
         with torch.no_grad():
             _ = models[idx](inputs[idx])
+
+        print(f"    [DEBUG] Model forward completed, calling synchronize...")
+        sys.stdout.flush()
         torch.cuda.synchronize()
         print(f"  {client_type} warmup done")
+        sys.stdout.flush()
 
     # 恢复原始设置（正式执行时可以启用 benchmark）
     torch.backends.cudnn.benchmark = original_benchmark
