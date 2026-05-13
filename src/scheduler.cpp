@@ -394,20 +394,38 @@ bool Scheduler::init_green_contexts(const GreenCtxConfig& gc_config) {
     // 避免首个真实 workload op 把冷启动开销计入测时段。
     auto prime_ctx = [&](int ctx_idx, cudaStream_t s) {
         if (cuCtxSetCurrent(cuda_ctxs_[ctx_idx]) != CUDA_SUCCESS) return;
-        void* dummy = nullptr;
-        if (cudaMalloc(&dummy, 16) != cudaSuccess) return;
-        cudaMemsetAsync(dummy, 0, 16, s);
+
+        // 分配 device 内存用于 dummy 操作
+        float *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
+        if (cudaMalloc(&d_a, sizeof(float)) != cudaSuccess) return;
+        if (cudaMalloc(&d_b, sizeof(float)) != cudaSuccess) {
+            cudaFree(d_a);
+            return;
+        }
+        if (cudaMalloc(&d_c, sizeof(float)) != cudaSuccess) {
+            cudaFree(d_a);
+            cudaFree(d_b);
+            return;
+        }
+
+        // 初始化为 0
+        cudaMemsetAsync(d_a, 0, sizeof(float), s);
+        cudaMemsetAsync(d_b, 0, sizeof(float), s);
+        cudaMemsetAsync(d_c, 0, sizeof(float), s);
+
         // 触发 cuBLAS 内部 workspace 初始化：1x1 的 sgemm
         cublasHandle_t h = cublas_handles_[ctx_idx];
         if (h) {
             cublasSetStream(h, s);
-            float a = 0.f, b = 0.f, c = 0.f;
             float alpha = 1.f, beta = 0.f;
             cublasSgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, 1, 1, 1,
-                        &alpha, &a, 1, &b, 1, &beta, &c, 1);
+                        &alpha, d_a, 1, d_b, 1, &beta, d_c, 1);
         }
+
         cudaStreamSynchronize(s);
-        cudaFree(dummy);
+        cudaFree(d_a);
+        cudaFree(d_b);
+        cudaFree(d_c);
     };
     prime_ctx(0, hp_gc_stream_);
     prime_ctx(1, be_gc_streams_[0]);
