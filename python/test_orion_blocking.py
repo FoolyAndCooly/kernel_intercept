@@ -317,7 +317,7 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
         # 在 worker 线程中初始化 CUDA context（每个线程需要自己的 context）
         # 这对 Green Context 模式尤其重要，因为 CUDA context 是 thread-local 的
         torch.cuda.set_device(0)
-        torch.cuda.synchronize()
+        # 注意：不调用 synchronize()，因为 Green Context 的 prime 操作可能已经破坏了状态
 
         lib.orion_set_client_idx(idx)
         client_type = "HP" if idx == 0 else f"BE{idx}"
