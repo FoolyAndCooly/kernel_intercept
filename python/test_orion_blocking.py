@@ -247,13 +247,27 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     #
     # 关键发现：VGG16 的 cuDNN 初始化在 Green Context 创建后会卡死，
     # 即使禁用 benchmark 也无法解决。必须在 SM 分区之前完成 warmup。
+    #
+    # 诊断：用简单卷积层代替完整 VGG16，隔离问题
     # ========================================================================
     print("\nSerial warmup (before Green Context creation)...")
     for idx in range(num_clients):
         client_type = "HP" if idx == 0 else f"BE{idx}"
         print(f"  Warming up {client_type} (client {idx})...")
-        with torch.no_grad():
-            _ = models[idx](inputs[idx])
+
+        if idx == 0:
+            # HP: 正常 warmup GPT
+            with torch.no_grad():
+                _ = models[idx](inputs[idx])
+        else:
+            # BE: 用简单卷积层代替完整 VGG16
+            print(f"    [DEBUG] Using simple conv layer instead of full VGG16")
+            simple_conv = torch.nn.Conv2d(3, 64, kernel_size=3, padding=1).cuda()
+            simple_input = torch.randn(1, 3, 32, 32, device='cuda')
+            with torch.no_grad():
+                _ = simple_conv(simple_input)
+            print(f"    [DEBUG] Simple conv completed")
+
         torch.cuda.synchronize()
         print(f"  {client_type} warmup done")
 
