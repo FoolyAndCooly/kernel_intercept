@@ -968,6 +968,21 @@ cudaError_t cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
 }
 
 // ============================================================================
+// __cudaLaunchKernel 拦截（CUDA 内部符号）
+// ============================================================================
+// PyTorch 的 libtorch_cuda.so 直接调用 __cudaLaunchKernel（带下划线前缀的
+// 内部符号），绕过了 cudaLaunchKernel 公共 API。LD_DEBUG bindings 确认了
+// 这一行为。必须同时拦截 __cudaLaunchKernel 才能捕获 PyTorch 原生 kernel。
+//
+// __cudaLaunchKernel 的签名与 cudaLaunchKernel 完全相同。
+// ----------------------------------------------------------------------------
+cudaError_t __cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
+                               void** args, size_t sharedMem, cudaStream_t stream) {
+    // 直接复用 cudaLaunchKernel 的拦截逻辑
+    return cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
+}
+
+// ============================================================================
 // Step C：cudaLaunchKernelExC / cudaLaunchKernelEx 拦截
 // ============================================================================
 // PyTorch / CUDA Graph / cooperative launch 会走 cudaLaunchKernelEx 路径，
