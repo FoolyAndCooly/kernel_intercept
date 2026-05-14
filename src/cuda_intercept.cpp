@@ -465,6 +465,15 @@ cudaError_t execute_kernel_launch(OperationPtr op, cudaStream_t scheduler_stream
     // ISOLATED 模式：必须使用 cudaLaunchKernelExC 而非 cudaLaunchKernel。
     // cudaLaunchKernel (Runtime API) 无法正确使用 Driver API 创建的 GC stream，
     // kernel 会落到 default stream。cudaLaunchKernelExC 能正确路由到 GC stream。
+    if (!g_real_funcs.initialized) init_real_functions();
+
+    static std::atomic<uint64_t> launch_count{0};
+    uint64_t cnt = launch_count.fetch_add(1);
+    if (cnt < 5 || cnt % 200 == 0) {
+        LOG_INFO("[LAUNCH-PATH] cnt=%lu scheduler_stream=%p ExC_ptr=%p op_type=%d",
+                 cnt, scheduler_stream, (void*)g_real_funcs.cudaLaunchKernelExC, (int)op->type);
+    }
+
     if (scheduler_stream && g_real_funcs.cudaLaunchKernelExC) {
         cudaLaunchConfig_t config = {};
         config.gridDim = p.gridDim;
@@ -474,10 +483,18 @@ cudaError_t execute_kernel_launch(OperationPtr op, cudaStream_t scheduler_stream
         config.numAttrs = 0;
         config.attrs = nullptr;
 
-        return g_real_funcs.cudaLaunchKernelExC(&config, p.func, args);
+        cudaError_t err = g_real_funcs.cudaLaunchKernelExC(&config, p.func, args);
+        if (cnt < 3) {
+            LOG_INFO("[LAUNCH-PATH] Used cudaLaunchKernelExC, result=%d", (int)err);
+        }
+        return err;
     }
 
     // DEFAULT 模式回退：使用 cudaLaunchKernel
+    if (cnt < 3) {
+        LOG_INFO("[LAUNCH-PATH] Fallback to cudaLaunchKernel (scheduler_stream=%p, ExC=%p)",
+                 scheduler_stream, (void*)g_real_funcs.cudaLaunchKernelExC);
+    }
     GET_REAL_FUNC(cudaLaunchKernel);
     cudaError_t result = g_real_funcs.cudaLaunchKernel(
         p.func, p.gridDim, p.blockDim,
