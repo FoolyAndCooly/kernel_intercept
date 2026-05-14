@@ -127,7 +127,10 @@ def add_thread_names_to_trace(trace_file, thread_ids, num_clients):
         new_events.append({"ph": "M", "pid": pid, "tid": sched_tid, "name": "thread_name", "args": {"name": name}})
 
     for i, stream_tid in enumerate(sorted(stream_tids.keys())):
-        name = "GPU-Stream-HP" if i == 0 else f"GPU-Stream-BE{i}"
+        if i == 0:
+            name = f"GPU-Stream-HP(tid={stream_tid})"
+        else:
+            name = f"GPU-Stream-BE{i}(tid={stream_tid})"
         new_events.append({"ph": "M", "pid": 0, "tid": stream_tid, "name": "thread_name", "args": {"name": name}})
 
     trace['traceEvents'] = new_events
@@ -309,6 +312,11 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
 
         lib.orion_set_client_idx(idx)
         client_type = "HP" if idx == 0 else f"BE{idx}"
+
+        # 注册当前线程的 PyTorch default stream 到 client 映射表，
+        # 让 PyTorch 内部在该线程上用 default stream 发起的操作也能被正确路由
+        cur_stream = torch.cuda.current_stream()
+        lib.orion_register_client_stream(idx, ctypes.c_void_p(cur_stream.cuda_stream))
 
         # 等待所有线程同时开始
         start.wait()

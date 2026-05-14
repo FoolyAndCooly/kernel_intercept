@@ -430,7 +430,12 @@ bool Scheduler::init_green_contexts(const GreenCtxConfig& gc_config) {
     prime_ctx(0, hp_gc_stream_);
     prime_ctx(1, be_gc_streams_[0]);
 
-    // Step 7: 恢复 primary context（启动时默认 ISOLATED 模式直接用 GC）
+    // Step 7: 注册 GC stream 到 client 映射表，让 cuBLAS/cuDNN 内部线程
+    // 通过 stream 指针也能 resolve 到正确的 client
+    register_client_stream(0, (void*)hp_gc_stream_);
+    register_client_stream(1, (void*)be_gc_streams_[0]);
+
+    // Step 8: 恢复 primary context（启动时默认 ISOLATED 模式直接用 GC）
     CHECK_CU(cuCtxSetCurrent(primary_ctx_));
 
     green_ctx_initialized_ = true;
