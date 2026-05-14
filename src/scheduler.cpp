@@ -1026,6 +1026,8 @@ cudaError_t Scheduler::execute_operation(OperationPtr op, cudaStream_t stream, c
 
     switch (op->type) {
         case OperationType::KERNEL_LAUNCH:
+        case OperationType::KERNEL_LAUNCH_EX:
+        case OperationType::KERNEL_LAUNCH_DRV:
         case OperationType::MALLOC:
         case OperationType::FREE:
         case OperationType::MEMCPY:
