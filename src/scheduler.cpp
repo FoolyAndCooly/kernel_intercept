@@ -60,6 +60,8 @@ static bool is_memory_operation(OperationType type) {
 static bool is_kernel_operation(OperationType type) {
     switch (type) {
         case OperationType::KERNEL_LAUNCH:
+        case OperationType::KERNEL_LAUNCH_EX:
+        case OperationType::KERNEL_LAUNCH_DRV:
         case OperationType::CUDNN_CONV_FWD:
         case OperationType::CUDNN_CONV_BWD_DATA:
         case OperationType::CUDNN_CONV_BWD_FILTER:
