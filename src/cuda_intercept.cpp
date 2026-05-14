@@ -431,6 +431,13 @@ cudaError_t execute_kernel_launch(OperationPtr op, cudaStream_t scheduler_stream
         cudaEventCreate(&g_scheduler_event);
     });
 
+    static std::atomic<uint64_t> entry_count{0};
+    uint64_t ecnt = entry_count.fetch_add(1);
+    if (ecnt < 5) {
+        LOG_INFO("[EXEC-KERNEL] ENTERED execute_kernel_launch #%lu, op_type=%d, stream=%p, params_idx=%zu",
+                 ecnt, (int)op->type, scheduler_stream, op->params.index());
+    }
+
     // Verify parameter type
     if (op->params.index() != 0) {
         LOG_ERROR("Wrong variant index! Expected 0 (KernelLaunchParams), got %zu", op->params.index());
@@ -920,6 +927,13 @@ cudaError_t cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
     int client_idx = resolve_client_idx(stream);
     if (client_idx < 0) return real_cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
 
+    static std::atomic<uint64_t> intercept_count{0};
+    uint64_t ic = intercept_count.fetch_add(1);
+    if (ic < 5 || ic % 200 == 0) {
+        LOG_INFO("[INTERCEPT-LK] #%lu client=%d stream=%p capture=%d",
+                 ic, client_idx, stream, is_capture_enabled() ? 1 : 0);
+    }
+
     // 使用新接口避免竞态条件
     auto op = create_operation(client_idx, OperationType::KERNEL_LAUNCH);
     if (!op) {
@@ -976,6 +990,12 @@ cudaError_t cudaLaunchKernelExC(const cudaLaunchConfig_t* config,
     if (client_idx < 0) {
         GET_REAL_FUNC(cudaLaunchKernelExC);
         return g_real_funcs.cudaLaunchKernelExC(config, func, args);
+    }
+
+    static std::atomic<uint64_t> exc_count{0};
+    uint64_t ec = exc_count.fetch_add(1);
+    if (ec < 5 || ec % 200 == 0) {
+        LOG_INFO("[INTERCEPT-ExC] #%lu client=%d stream=%p", ec, client_idx, config->stream);
     }
 
     auto op = create_operation(client_idx, OperationType::KERNEL_LAUNCH_EX);
