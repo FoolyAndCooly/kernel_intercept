@@ -443,8 +443,7 @@ cudaError_t execute_kernel_launch(OperationPtr op, cudaStream_t scheduler_stream
     // 使用调度器分配的 stream 而不是客户端的 stream
     cudaStream_t stream_to_use = scheduler_stream ? scheduler_stream : p.stream;
 
-    // Step C：按拦截来源选择 real_func。Runtime 的 launch（KERNEL_LAUNCH /
-    // KERNEL_LAUNCH_EX）用 cudaLaunchKernel；Driver 的 cuLaunchKernel
+    // Step C：按拦截来源选择 real_func。Driver API 的 cuLaunchKernel
     // 必须用 cuLaunchKernel，因为 func 是 CUfunction，不是 host entry。
     if (op->type == OperationType::KERNEL_LAUNCH_DRV) {
         if (!g_real_funcs.initialized) init_real_functions();
@@ -463,10 +462,23 @@ cudaError_t execute_kernel_launch(OperationPtr op, cudaStream_t scheduler_stream
         return cr == CUDA_SUCCESS ? cudaSuccess : cudaErrorUnknown;
     }
 
+    // ISOLATED 模式：必须使用 cudaLaunchKernelExC 而非 cudaLaunchKernel。
+    // cudaLaunchKernel (Runtime API) 无法正确使用 Driver API 创建的 GC stream，
+    // kernel 会落到 default stream。cudaLaunchKernelExC 能正确路由到 GC stream。
+    if (scheduler_stream && g_real_funcs.cudaLaunchKernelExC) {
+        cudaLaunchConfig_t config = {};
+        config.gridDim = p.gridDim;
+        config.blockDim = p.blockDim;
+        config.dynamicSmemBytes = p.sharedMem;
+        config.stream = stream_to_use;
+        config.numAttrs = 0;
+        config.attrs = nullptr;
+
+        return g_real_funcs.cudaLaunchKernelExC(&config, p.func, args);
+    }
+
+    // DEFAULT 模式回退：使用 cudaLaunchKernel
     GET_REAL_FUNC(cudaLaunchKernel);
-    // KERNEL_LAUNCH 与 KERNEL_LAUNCH_EX 都走 cudaLaunchKernel：ExC 路径的
-    // attrs（cluster 等）在 Orion 的 ISOLATED / GC 语义下没有额外影响，
-    // 归一化到 cudaLaunchKernel 能直接复用现有 real_func。
     cudaError_t result = g_real_funcs.cudaLaunchKernel(
         p.func, p.gridDim, p.blockDim,
         args,
