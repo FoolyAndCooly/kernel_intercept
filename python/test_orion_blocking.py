@@ -38,6 +38,7 @@ import argparse
 
 sys.path.insert(0, ".")
 import GPT as gpt_module
+import LLaMA as llama_module
 from VGG16 import VGG16Model
 
 # ============================================================================
@@ -57,6 +58,7 @@ gpt_module.n_layer = N_LAYER
 gpt_module.sequence_len = SEQUENCE_LEN
 
 from GPT import CharGPT
+from LLaMA import CharLLaMA
 
 # VGG 配置 - 调小以减少 SM 占用
 VGG_BATCH_SIZE = 2   # 从 8 减到 2
@@ -187,7 +189,7 @@ def load_library():
     return lib
 
 
-def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold=None):
+def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold=None, **kwargs):
     """
     运行 Orion 调度测试
 
@@ -231,19 +233,35 @@ def run_test(lib, num_be, num_iters, kernel_info_paths, trace_file, sm_threshold
     print(f"       Config: emb={EMB_SIZE}, heads={HEAD_SIZE}, layers={N_LAYER}")
     print(f"       Input: batch={GPT_BATCH_SIZE}, seq_len={SEQUENCE_LEN}")
 
-    # BE (client 1+): 也使用 GPT（测试：避免 cuDNN 问题）
+    # BE (client 1+): 根据 be_model 参数选择模型
     models = [gpt_model]
     inputs = [torch.randint(0, VOCAB_SIZE, (GPT_BATCH_SIZE, SEQUENCE_LEN), device="cuda")]
 
+    be_model_type = kwargs.get('be_model', 'gpt')
+
     for i in range(num_be):
-        # 使用 GPT 代替 VGG16，测试是否是 cuDNN 的问题
-        be_gpt_model = CharGPT(vs=VOCAB_SIZE).to("cuda").eval()
-        be_gpt_params = sum(p.numel() for p in be_gpt_model.parameters())
-        print(f"  [BE{i+1}] GPT params: {be_gpt_params/1e6:.1f}M (using GPT instead of VGG16)")
-        print(f"        Config: emb={EMB_SIZE}, heads={HEAD_SIZE}, layers={N_LAYER}")
-        print(f"        Input: batch={GPT_BATCH_SIZE}, seq_len={SEQUENCE_LEN}")
-        models.append(be_gpt_model)
-        inputs.append(torch.randint(0, VOCAB_SIZE, (GPT_BATCH_SIZE, SEQUENCE_LEN), device="cuda"))
+        if be_model_type == 'llama':
+            llama_module.hidden_size = EMB_SIZE
+            llama_module.num_heads = EMB_SIZE // HEAD_SIZE
+            llama_module.num_kv_heads = EMB_SIZE // HEAD_SIZE
+            llama_module.num_layers = N_LAYER
+            llama_module.intermediate_size = EMB_SIZE * 4
+            llama_module.sequence_len = SEQUENCE_LEN
+            be_model = CharLLaMA(vs=VOCAB_SIZE).to("cuda").eval()
+            be_params = sum(p.numel() for p in be_model.parameters())
+            print(f"  [BE{i+1}] LLaMA params: {be_params/1e6:.1f}M")
+            print(f"        Config: hidden={EMB_SIZE}, heads={EMB_SIZE//HEAD_SIZE}, layers={N_LAYER}")
+            print(f"        Input: batch={GPT_BATCH_SIZE}, seq_len={SEQUENCE_LEN}")
+            models.append(be_model)
+            inputs.append(torch.randint(0, VOCAB_SIZE, (GPT_BATCH_SIZE, SEQUENCE_LEN), device="cuda"))
+        else:
+            be_gpt_model = CharGPT(vs=VOCAB_SIZE).to("cuda").eval()
+            be_gpt_params = sum(p.numel() for p in be_gpt_model.parameters())
+            print(f"  [BE{i+1}] GPT params: {be_gpt_params/1e6:.1f}M")
+            print(f"        Config: emb={EMB_SIZE}, heads={HEAD_SIZE}, layers={N_LAYER}")
+            print(f"        Input: batch={GPT_BATCH_SIZE}, seq_len={SEQUENCE_LEN}")
+            models.append(be_gpt_model)
+            inputs.append(torch.randint(0, VOCAB_SIZE, (GPT_BATCH_SIZE, SEQUENCE_LEN), device="cuda"))
 
     torch.cuda.synchronize()
 
@@ -411,6 +429,8 @@ def main():
     parser.add_argument('--num-iters', type=int, default=2, help='Iterations per task (default: 2)')
     parser.add_argument('--sm-threshold', type=int, default=30, help='SM threshold (default: 30)')
     parser.add_argument('--output', type=str, default=None, help='Output trace file path')
+    parser.add_argument('--be-model', type=str, default='gpt', choices=['gpt', 'llama'],
+                        help='Model type for BE clients (default: gpt)')
     args = parser.parse_args()
 
     lib = load_library()
@@ -447,7 +467,7 @@ def main():
 
     # 使用项目根目录的 profiles 目录
     trace_file = args.output or os.path.join(project_root, f"profiles/orion_gpt_vgg_{args.num_be}be_trace.json")
-    result = run_test(lib, args.num_be, args.num_iters, kernel_info_list, trace_file, args.sm_threshold)
+    result = run_test(lib, args.num_be, args.num_iters, kernel_info_list, trace_file, args.sm_threshold, be_model=args.be_model)
 
     if result:
         print(f"\n{'='*60}")

@@ -961,7 +961,15 @@ cudaError_t cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
     op->params = std::move(kp);
     enqueue_operation(op);
 
-    // 同步模式：等待调度器执行完成
+    // 异步模式判断
+    int async_mode = get_async_mode_internal();
+
+    // Level 1: Worker 异步 - 立即返回，不等待 worker 执行
+    if (async_mode == 1) {
+        return cudaSuccess;  // 假设成功，错误延迟到 cudaDeviceSynchronize
+    }
+
+    // Level 0: 同步模式 - 等待调度器执行完成
     wait_operation(op);
 
     return op->result;
@@ -1030,6 +1038,13 @@ cudaError_t cudaLaunchKernelExC(const cudaLaunchConfig_t* config,
 
     op->params = std::move(kp);
     enqueue_operation(op);
+
+    // 异步模式判断
+    int async_mode = get_async_mode_internal();
+    if (async_mode == 1) {
+        return cudaSuccess;  // Worker 异步模式
+    }
+
     wait_operation(op);
     return op->result;
 }
@@ -1098,6 +1113,13 @@ CUresult cuLaunchKernel(CUfunction f,
 
     op->params = std::move(kp);
     enqueue_operation(op);
+
+    // 异步模式判断
+    int async_mode = get_async_mode_internal();
+    if (async_mode == 1) {
+        return CUDA_SUCCESS;  // Worker 异步模式
+    }
+
     wait_operation(op);
     // 把 runtime 错误码翻回 driver 错误码：成功走 CUDA_SUCCESS，其余一律
     // ERROR_UNKNOWN（调度器已经在执行端用 cuLaunchKernel，就按它返回）。
@@ -1115,22 +1137,42 @@ CUresult cuLaunchKernel(CUfunction f,
  */
 cudaError_t cudaDeviceSynchronize(void) {
     using namespace orion;
-    
+
     SAFE_PASSTHROUGH(cudaDeviceSynchronize);
-    
+
     if (!is_capture_enabled()) return real_cudaDeviceSynchronize();
     int client_idx = resolve_client_idx();
     if (client_idx < 0) return real_cudaDeviceSynchronize();
-    
-    // 在异步模式下，需要等待队列中所有操作完成
-    // 通过提交一个同步操作并等待它完成来实现
+
+    // 异步模式：先等待队列中所有操作完成，再检查累积的错误
+    int async_mode = get_async_mode_internal();
+
+    if (async_mode == 1) {
+        // 提交同步操作并等待（确保 worker 队列清空）
+        auto op = create_operation(client_idx, OperationType::DEVICE_SYNC);
+        if (!op) return real_cudaDeviceSynchronize();
+
+        op->params = SyncParams{nullptr, nullptr};
+        enqueue_operation(op);
+        wait_operation(op);
+
+        // 检查异步模式下累积的错误
+        cudaError_t async_err = get_and_clear_last_error(client_idx);
+        if (async_err != cudaSuccess) {
+            LOG_WARN("cudaDeviceSynchronize: returning deferred error %d from client %d",
+                     (int)async_err, client_idx);
+            return async_err;
+        }
+
+        return op->result;
+    }
+
+    // 同步模式：直接提交同步操作
     auto op = create_operation(client_idx, OperationType::DEVICE_SYNC);
     if (!op) return real_cudaDeviceSynchronize();
-    
+
     op->params = SyncParams{nullptr, nullptr};
     enqueue_operation(op);
-    
-    // 无论是否异步模式，同步操作都需要等待完成
     wait_operation(op);
     return op->result;
 }

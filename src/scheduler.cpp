@@ -935,8 +935,13 @@ void Scheduler::start() {
     }
 
     running_.store(true);
-    thread_ = std::thread(&Scheduler::run, this);
-    LOG_INFO("Scheduler thread started");
+
+    // 多 worker 模式：每个 client 一个独立线程
+    workers_.resize(num_clients_);
+    for (int i = 0; i < num_clients_; i++) {
+        workers_[i] = std::thread(&Scheduler::run_worker, this, i);
+    }
+    LOG_INFO("Scheduler started with %d worker threads (multi-worker mode)", num_clients_);
 }
 
 void Scheduler::stop() {
@@ -954,10 +959,19 @@ void Scheduler::stop() {
 }
 
 void Scheduler::join() {
+    // 多 worker 模式
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    workers_.clear();
+
+    // 兼容 legacy 单线程模式
     if (thread_.joinable()) {
         thread_.join();
     }
-    LOG_INFO("Scheduler thread joined");
+    LOG_INFO("All scheduler workers joined");
 }
 
 void Scheduler::reset() {
@@ -1058,6 +1072,140 @@ cudaError_t Scheduler::execute_operation(OperationPtr op, cudaStream_t stream, c
             LOG_ERROR("Unknown operation type: %d", (int)op->type);
             return cudaErrorUnknown;
     }
+}
+
+/**
+ * @brief 多 Worker 模式：每个 client 一个独立线程
+ *
+ * 每个 worker 独立消费自己的 ClientQueue，天然并行提交 kernel。
+ * HP worker 直接执行，BE worker 执行前检查 orion_should_schedule。
+ * Green Context 模式下，每个 worker 在自己的线程中设置对应的 CUcontext。
+ */
+void Scheduler::run_worker(int client_idx) {
+    tl_is_scheduler_thread = true;
+    tl_worker_idx = client_idx;
+    LOG_INFO("Worker %d started (multi-worker mode)", client_idx);
+
+    cudaError_t err = cudaSetDevice(config_.device_id);
+    if (err != cudaSuccess) {
+        LOG_ERROR("Worker %d: cudaSetDevice(%d) failed: %s",
+                  client_idx, config_.device_id, cudaGetErrorString(err));
+        return;
+    }
+
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        LOG_WARN("Worker %d: cudaDeviceSynchronize returned %d: %s",
+                  client_idx, err, cudaGetErrorString(err));
+    }
+
+    // Green Context 模式：在 worker 线程中设置对应的 CUcontext
+    cublasHandle_t worker_cublas_handle = nullptr;
+    cudaStream_t worker_stream = nullptr;
+
+    if (current_mode_ == ExecutionMode::ISOLATED && green_ctx_initialized_) {
+        int ctx_idx = (client_idx == 0) ? 0 : 1;
+        cuCtxSetCurrent(cuda_ctxs_[ctx_idx]);
+        worker_cublas_handle = cublas_handles_[ctx_idx];
+        worker_stream = (client_idx == 0) ? hp_gc_stream_ : be_gc_streams_[0];
+        LOG_INFO("Worker %d: using Green Context %d, stream=%p", client_idx, ctx_idx, worker_stream);
+    } else {
+        worker_stream = (client_idx == 0) ? hp_stream_ : be_streams_[client_idx - 1];
+        LOG_INFO("Worker %d: using DEFAULT stream=%p", client_idx, worker_stream);
+    }
+
+    auto* q = g_capture_state.client_queues[client_idx].get();
+    if (!q) {
+        LOG_ERROR("Worker %d: queue is null", client_idx);
+        return;
+    }
+
+    while (running_.load()) {
+        auto op = q->try_pop();
+        if (!op) {
+            std::this_thread::yield();
+            continue;
+        }
+
+        // BE worker：检查调度判断
+        if (client_idx > 0 && !orion_should_schedule(op, client_idx)) {
+            // 放回队列头部不可行（queue 是 FIFO），改为忙等
+            // 重新 push 回去并 yield
+            q->push(op);
+            std::this_thread::yield();
+            continue;
+        }
+
+        // 选择执行 stream：优先使用 op 自带的 stream
+        cudaStream_t exec_stream = worker_stream;
+        switch (op->type) {
+            case OperationType::KERNEL_LAUNCH:
+            case OperationType::KERNEL_LAUNCH_EX:
+            case OperationType::KERNEL_LAUNCH_DRV: {
+                auto& p = std::get<KernelLaunchParams>(op->params);
+                if (p.stream) exec_stream = p.stream;
+                break;
+            }
+            case OperationType::CUBLAS_SGEMM:
+            case OperationType::CUBLAS_SGEMM_STRIDED_BATCHED: {
+                auto& p = std::get<CublasGemmParams>(op->params);
+                if (p.original_stream) exec_stream = p.original_stream;
+                break;
+            }
+            case OperationType::CUBLASLT_MATMUL: {
+                auto& p = std::get<CublasLtMatmulParams>(op->params);
+                if (p.stream) exec_stream = p.stream;
+                break;
+            }
+            case OperationType::MEMCPY_ASYNC: {
+                auto& p = std::get<MemcpyParams>(op->params);
+                if (p.stream) exec_stream = p.stream;
+                break;
+            }
+            case OperationType::MEMSET_ASYNC: {
+                auto& p = std::get<MemsetParams>(op->params);
+                if (p.stream) exec_stream = p.stream;
+                break;
+            }
+            default:
+                break;
+        }
+
+        // Green Context 模式下覆盖 stream
+        if (current_mode_ == ExecutionMode::ISOLATED && green_ctx_initialized_) {
+            exec_stream = worker_stream;
+        }
+
+        cudaError_t exec_err = execute_operation(op, exec_stream, worker_cublas_handle);
+
+        // 异步模式：记录错误（不阻塞客户端）
+        if (exec_err != cudaSuccess) {
+            LOG_ERROR("Worker %d: op %lu (type=%s) failed with error %d: %s",
+                      client_idx, op->op_id, op_type_name(op->type),
+                      (int)exec_err, cudaGetErrorString(exec_err));
+            set_last_error(client_idx, exec_err);
+        }
+
+        if (is_kernel_operation(op->type)) {
+            std::lock_guard<std::mutex> lock(g_orion_state.mutex);
+            g_orion_state.seen[client_idx]++;
+        }
+
+        op->mark_completed(exec_err);
+    }
+
+    // 处理剩余操作
+    LOG_INFO("Worker %d: draining remaining operations", client_idx);
+    while (!q->empty()) {
+        auto op = q->try_pop();
+        if (op) {
+            cudaError_t exec_err = execute_operation(op, worker_stream, worker_cublas_handle);
+            op->mark_completed(exec_err);
+        }
+    }
+    if (worker_stream) cudaStreamSynchronize(worker_stream);
+
+    LOG_INFO("Worker %d exiting", client_idx);
 }
 
 /**

@@ -347,6 +347,12 @@ void register_client_handle(int client_idx, void* handle);
 int  resolve_client_idx(void* stream = nullptr, void* handle = nullptr);
 void clear_client_maps();
 
+// 异步模式支持
+void set_async_mode_internal(int mode);
+int  get_async_mode_internal();
+void set_last_error(int client_idx, cudaError_t error);
+cudaError_t get_and_clear_last_error(int client_idx);
+
 // 异步模式控制
 void set_async_mode_internal(int mode);
 int get_async_mode_internal();

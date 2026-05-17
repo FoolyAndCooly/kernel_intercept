@@ -141,7 +141,8 @@ public:
     std::atomic<bool> running_{false};
 
 private:
-    void run();  // 单线程轮询
+    void run();  // 单线程轮询（legacy，保留用于调试）
+    void run_worker(int client_idx);  // 多 worker 模式：每个 client 一个线程
     cudaError_t execute_operation(OperationPtr op, cudaStream_t stream, cublasHandle_t cublas_handle = nullptr);
     bool orion_should_schedule(OperationPtr op, int client_idx);
     bool create_streams();
@@ -165,7 +166,8 @@ public:
 
 private:
     SchedulerConfig config_;
-    std::thread thread_;
+    std::thread thread_;  // legacy 单线程模式
+    std::vector<std::thread> workers_;  // 多 worker 模式
     std::atomic<bool> initialized_{false};
 
     int num_clients_{0};

@@ -116,6 +116,18 @@ int init_capture_layer(int num_clients) {
 
     init_log_level();
 
+    // 初始化异步模式（从环境变量读取）
+    const char* async_mode_env = std::getenv("ORION_ASYNC_MODE");
+    if (async_mode_env) {
+        int mode = std::atoi(async_mode_env);
+        if (mode >= 0 && mode <= 2) {
+            set_async_mode_internal(mode);
+            LOG_INFO("Async mode set to %d from ORION_ASYNC_MODE env var", mode);
+        } else {
+            LOG_WARN("Invalid ORION_ASYNC_MODE value: %s (must be 0-2)", async_mode_env);
+        }
+    }
+
     g_capture_state.num_clients = num_clients;
 
     // 初始化 per-client 操作队列
@@ -227,15 +239,35 @@ OperationPtr submit_operation(int client_idx, OperationType type) {
     return op;
 }
 
-// 异步模式控制
-static std::atomic<int> g_async_mode{0};
+// 异步模式控制（默认 Level 1: Worker 异步）
+static std::atomic<int> g_async_mode{1};
+
+// 异步模式错误记录（每个 client 一个）
+constexpr int MAX_CLIENTS = 16;
+static std::atomic<cudaError_t> g_last_error[MAX_CLIENTS];
 
 void set_async_mode_internal(int mode) {
     g_async_mode.store(mode);
+    LOG_INFO("Async mode set to %d (0=sync, 1=worker_async, 2=passthrough)", mode);
 }
 
 int get_async_mode_internal() {
     return g_async_mode.load();
+}
+
+void set_last_error(int client_idx, cudaError_t error) {
+    if (client_idx >= 0 && client_idx < MAX_CLIENTS) {
+        // 只记录第一个错误（后续错误被忽略）
+        cudaError_t expected = cudaSuccess;
+        g_last_error[client_idx].compare_exchange_strong(expected, error);
+    }
+}
+
+cudaError_t get_and_clear_last_error(int client_idx) {
+    if (client_idx >= 0 && client_idx < MAX_CLIENTS) {
+        return g_last_error[client_idx].exchange(cudaSuccess);
+    }
+    return cudaSuccess;
 }
 
 } // namespace orion
