@@ -961,15 +961,9 @@ cudaError_t cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
     op->params = std::move(kp);
     enqueue_operation(op);
 
-    // 异步模式判断
-    int async_mode = get_async_mode_internal();
-
-    // Level 1: Worker 异步 - 立即返回，不等待 worker 执行
-    if (async_mode == 1) {
-        return cudaSuccess;  // 假设成功，错误延迟到 cudaDeviceSynchronize
-    }
-
-    // Level 0: 同步模式 - 等待调度器执行完成
+    // 注意：cudaLaunchKernel 的 args 是指向客户端栈上的指针数组，
+    // 异步返回后栈帧销毁，worker 访问时会产生野指针（segfault）。
+    // 因此无论 async_mode 为何值，都必须等待 worker 完成后再返回。
     wait_operation(op);
 
     return op->result;
@@ -1039,12 +1033,7 @@ cudaError_t cudaLaunchKernelExC(const cudaLaunchConfig_t* config,
     op->params = std::move(kp);
     enqueue_operation(op);
 
-    // 异步模式判断
-    int async_mode = get_async_mode_internal();
-    if (async_mode == 1) {
-        return cudaSuccess;  // Worker 异步模式
-    }
-
+    // args 指向客户端栈，异步返回后栈帧销毁，必须同步等待 worker 完成。
     wait_operation(op);
     return op->result;
 }
@@ -1114,15 +1103,8 @@ CUresult cuLaunchKernel(CUfunction f,
     op->params = std::move(kp);
     enqueue_operation(op);
 
-    // 异步模式判断
-    int async_mode = get_async_mode_internal();
-    if (async_mode == 1) {
-        return CUDA_SUCCESS;  // Worker 异步模式
-    }
-
+    // kernelParams 指向客户端栈，异步返回后栈帧销毁，必须同步等待 worker 完成。
     wait_operation(op);
-    // 把 runtime 错误码翻回 driver 错误码：成功走 CUDA_SUCCESS，其余一律
-    // ERROR_UNKNOWN（调度器已经在执行端用 cuLaunchKernel，就按它返回）。
     return op->result == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
 }
 
