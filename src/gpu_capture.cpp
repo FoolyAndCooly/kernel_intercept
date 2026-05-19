@@ -244,7 +244,6 @@ OperationPtr submit_operation(int client_idx, OperationType type) {
 static std::atomic<int> g_async_mode{1};
 
 // 异步模式错误记录（每个 client 一个）
-constexpr int MAX_CLIENTS = 16;
 static std::atomic<cudaError_t> g_last_error[MAX_CLIENTS];
 
 void set_async_mode_internal(int mode) {
