@@ -253,6 +253,11 @@ extern thread_local bool tl_is_scheduler_thread;
  */
 extern thread_local bool tl_in_scheduler_execution;
 
+/**
+ * @brief 当前 worker 线程的 client 索引（多 worker 模式）
+ */
+extern thread_local int tl_worker_idx;
+
 } // namespace orion
 
 #endif // ORION_COMMON_H

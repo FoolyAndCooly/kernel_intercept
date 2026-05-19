@@ -157,13 +157,15 @@ struct CublasGemmParams {
     float alpha_value;
     float beta_value;
     bool use_stored_scalars;
+    cudaStream_t stream;
 
     CublasGemmParams() : handle(nullptr), transa(0), transb(0),
                          m(0), n(0), k(0), alpha(nullptr), A(nullptr), lda(0),
                          B(nullptr), ldb(0), beta(nullptr), C(nullptr), ldc(0),
                          batchCount(0), strideA(0), strideB(0), strideC(0),
                          is_batched(false), is_strided(false),
-                         alpha_value(1.0f), beta_value(0.0f), use_stored_scalars(false) {}
+                         alpha_value(1.0f), beta_value(0.0f), use_stored_scalars(false),
+                         stream(nullptr) {}
 };
 
 struct CublasLtMatmulParams {

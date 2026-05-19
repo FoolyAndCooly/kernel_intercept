@@ -37,6 +37,7 @@ extern cublasStatus_t execute_cublaslt_operation(OperationPtr op, cudaStream_t s
 
 // 线程局部变量
 using orion::tl_is_scheduler_thread;
+using orion::tl_worker_idx;
 
 // ============================================================================
 // 辅助函数
@@ -1149,7 +1150,7 @@ void Scheduler::run_worker(int client_idx) {
             case OperationType::CUBLAS_SGEMM:
             case OperationType::CUBLAS_SGEMM_STRIDED_BATCHED: {
                 auto& p = std::get<CublasGemmParams>(op->params);
-                if (p.original_stream) exec_stream = p.original_stream;
+                if (p.stream) exec_stream = p.stream;
                 break;
             }
             case OperationType::CUBLASLT_MATMUL: {

@@ -28,6 +28,7 @@ LogLevel g_log_level = LogLevel::INFO;
 static thread_local int tl_client_idx = -1;
 thread_local bool tl_is_scheduler_thread = false;
 thread_local bool tl_in_scheduler_execution = false;
+thread_local int tl_worker_idx = -1;
 
 // ----------------------------------------------------------------------------
 // Stream / handle → client_idx 映射（Step B：供库内部线程回查 client）
