@@ -1427,16 +1427,17 @@ cublasStatus_t cublasLtMatmul(
     }
     
     op->params = params;
-    
+
     // 提交到队列
     enqueue_operation(op);
-    
-    if (async_mode) {
-        // 异步模式：不等待，立即返回
-        return CUBLAS_STATUS_SUCCESS;
-    }
-    
-    // 同步模式：等待完成
+
+    // 注意：cublasLtMatmul 的 computeDesc / Adesc / Bdesc / Cdesc / Ddesc / algo
+    // 都是 PyTorch 在调用前临时创建（cublasLtMatmulDescCreate /
+    // cublasLtMatrixLayoutCreate）、调用返回后立即销毁的栈/堆对象。
+    // 异步模式下若 client 立即返回，worker 后到时这些描述符已被释放，
+    // cuBLASLt 内部 kernel launch 会失败并产生 cudaErrorUnknown(999)。
+    // 因此即使在 async_mode==1 下也必须等待 worker 完成。
+    // （与 cudaLaunchKernel 因 args 在栈上而强制同步是同一类问题。）
     wait_operation(op);
     return (cublasStatus_t)op->result;
 }
